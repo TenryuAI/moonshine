@@ -401,16 +401,26 @@ extern "C" JNIEXPORT int JNICALL
 Java_ai_moonshine_voice_JNI_moonshineAddAudioToStream(
     JNIEnv *env, jobject /* this */, jint transcriber_handle,
     jint stream_handle, jfloatArray audio_data, jint sample_rate) {
+  float *audio_data_ptr = nullptr;
   try {
     if (audio_data == nullptr) {
       return MOONSHINE_ERROR_INVALID_ARGUMENT;
     }
-    float *audio_data_ptr = env->GetFloatArrayElements(audio_data, nullptr);
+    audio_data_ptr = env->GetFloatArrayElements(audio_data, nullptr);
+    if (audio_data_ptr == nullptr) {
+      return MOONSHINE_ERROR_UNKNOWN;
+    }
     size_t audio_data_size = env->GetArrayLength(audio_data);
-    return moonshine_transcribe_add_audio_to_stream(
+    int result = moonshine_transcribe_add_audio_to_stream(
         transcriber_handle, stream_handle, audio_data_ptr, audio_data_size,
         sample_rate, 0);
+    env->ReleaseFloatArrayElements(audio_data, audio_data_ptr, JNI_ABORT);
+    audio_data_ptr = nullptr;
+    return result;
   } catch (const std::exception &e) {
+    if (audio_data_ptr != nullptr) {
+      env->ReleaseFloatArrayElements(audio_data, audio_data_ptr, JNI_ABORT);
+    }
     LOGE("moonshineAddAudioToStream: %s\n", e.what());
     return MOONSHINE_ERROR_UNKNOWN;
   }
@@ -424,15 +434,12 @@ Java_ai_moonshine_voice_JNI_moonshineTranscribeStream(JNIEnv *env,
                                                       jint flags) {
   try {
     struct transcript_t *transcript = nullptr;
-    LOGE("moonshineTranscribeStream: start transcribe stream");
     int transcription_error = moonshine_transcribe_stream(
         transcriber_handle, stream_handle, flags, &transcript);
-    LOGE("moonshineTranscribeStream: transcription error: %d", transcription_error);
     if (transcription_error != 0) {
       LOGE("moonshineTranscribeStream: transcription error: %d", transcription_error);
       return nullptr;
     }
-    LOGE("moonshineTranscribeStream: transcript=%p", (void *)transcript);
     return c_transcript_to_jobject(env, transcript);
   } catch (const std::exception &e) {
     LOGE("moonshineTranscribeStream: %s\n", e.what());

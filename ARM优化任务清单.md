@@ -647,6 +647,268 @@ P0 不一定强行上完整零拷贝，但建议至少先做两件事：
 - 收益由快到慢
 - 回归定位由易到难
 
+## 12.5 四个提交的函数级实施 checklist
+
+这一节把前面的“提交级拆分”继续压到函数级，目的是让后续真正进入编码时可以直接按函数逐项勾选。
+
+### 提交 1 的函数级 checklist：Android JNI 热路径收敛
+
+#### 提交 2 涉及文件
+
+- `android/moonshine-jni/moonshine-jni.cpp`
+
+#### 重点函数 1：`Java_ai_moonshine_voice_JNI_moonshineAddAudioToStream`
+
+当前要解决的问题：
+
+- `GetFloatArrayElements()` 获取后的生命周期不清晰
+- 当前函数直接 `return moonshine_transcribe_add_audio_to_stream(...)`
+- 这样会让释放路径不够明确
+
+实施 checklist：
+
+1. 先把 `GetFloatArrayElements()` 返回值保存到局部变量
+2. 先把 `GetArrayLength()` 结果保存到局部变量
+3. 调用 `moonshine_transcribe_add_audio_to_stream(...)` 时不要直接 `return`
+4. 把返回值先保存到局部 `int result`
+5. 在正常路径里调用 `ReleaseFloatArrayElements(audio_data, audio_data_ptr, JNI_ABORT)` 或等价释放策略
+6. 再 `return result`
+7. 确保异常路径下也不会遗漏释放
+
+这个函数本提交里不要顺手做的事：
+
+- 不要改 JNI 方法签名
+- 不要改 Java 层接口
+- 不要在这里同时引入 `DirectBuffer`
+
+#### 重点函数 2：`Java_ai_moonshine_voice_JNI_moonshineTranscribeStream`
+
+当前要解决的问题：
+
+- 热路径里有多条 `LOGE`
+- 这些日志不是错误级别的必要日志
+- 在 ARM Android 设备上会形成同步 I/O 干扰
+
+实施 checklist：
+
+1. 去掉 `start transcribe stream` 这类热路径日志
+2. 去掉成功路径上的 transcript 指针打印
+3. 保留真正错误分支的错误日志
+4. 如果需要保留调试能力，改成 debug 宏或可开关日志
+
+这个函数本提交里不要顺手做的事：
+
+- 不要改 `c_transcript_to_jobject()` 的对象构造逻辑
+- 不要改 transcript 返回结构
+
+#### 提交 1 完成后需要人工复查的函数
+
+- `Java_ai_moonshine_voice_JNI_moonshineStartStream`
+- `Java_ai_moonshine_voice_JNI_moonshineStopStream`
+
+复查目的：
+
+- 确认 JNI 生命周期修改没有破坏上下文调用顺序
+
+### 提交 2 的函数级 checklist：重采样直通与 stream 入流轻量化
+
+#### 提交 2 涉及文件
+
+- `core/resampler.h`
+- `core/resampler.cpp`
+- `core/transcriber.cpp`
+
+#### 重点函数 1：`resample_audio`
+
+当前要解决的问题：
+
+- 同采样率时仍走按值返回 `std::vector<float>`
+- 从语义上是“原样返回”，从实现上仍可能发生复制
+
+实施 checklist：
+
+1. 明确本提交是否改接口
+2. 如果不改接口：
+   - 保持 `resample_audio()` 存在
+   - 主要在调用方避免不必要调用
+3. 如果要小改接口：
+   - 只增加最小辅助函数
+   - 不一次性重做整个 resampler 架构
+
+建议优先方案：
+
+1. 保守处理：调用侧先判断采样率是否相同
+2. 同采样率时不进入 `resample_audio()`
+
+这个函数本提交里不要顺手做的事：
+
+- 不要引入 NEON 优化
+- 不要重写 downsample / upsample 算法
+
+#### 重点函数 2：`TranscriberStream::add_to_new_audio_buffer`
+
+当前要解决的问题：
+
+- 先构造 `audio_vector`
+- 再构造 `resampled_audio`
+- 再追加到 `new_audio_buffer`
+
+实施 checklist：
+
+1. 保留 `save_audio_data_to_wav()` 行为不变
+2. 增加“采样率已等于 `INTERNAL_SAMPLE_RATE`”的分支
+3. 在同采样率分支中，直接把 `audio_data` 追加到 `new_audio_buffer`
+4. 仅在采样率不同的分支里构造临时 `std::vector<float>`
+5. 保持返回行为与调用方无差异
+
+建议本提交不要顺手改的函数：
+
+- `VoiceActivityDetector::process_audio`
+- `Transcriber::transcribe_stream`
+
+原因：
+
+- 提交 2 应只解决 stream 入流与 resampler 路径，不混入 VAD 行为风险
+
+#### 提交 2 完成后需要人工复查的函数
+
+- `resample_audio`
+- `downsample_audio`
+- `upsample_audio`
+- `TranscriberStream::clear_new_audio_buffer`
+
+复查目的：
+
+- 确认同采样率快路径没有绕过必要逻辑
+
+### 提交 3 的函数级 checklist：VAD 输入路径和缓冲重构
+
+#### 提交 3 涉及文件
+
+- `core/voice-activity-detector.h`
+- `core/voice-activity-detector.cpp`
+
+必要时少量联动：
+
+- `core/transcriber.cpp`
+
+#### 重点函数 1：`VoiceActivityDetector::process_audio`
+
+当前要解决的问题：
+
+- 输入先转 `input_audio_vector`
+- 再 `resample_audio`
+- 再构造 `processing_buffer`
+- 再循环 `erase`
+
+实施 checklist：
+
+1. 先保持函数外部行为完全不变
+2. 去掉 `processing_buffer.erase(...)` 依赖
+3. 改成：
+   - 滑动起始索引
+   - 或环形缓冲
+4. 循环内只推进消费位置，不真实搬移头部
+5. 循环结束后再整理 remainder
+6. 确保 `processing_remainder_audio_buffer` 语义不变
+
+这个函数本提交里不要顺手做的事：
+
+- 不要改 VAD 判定阈值逻辑
+- 不要改 `process_audio_chunk()` 的核心语义
+- 不要改 `on_voice_start()` / `on_voice_end()` 触发规则
+
+#### 重点函数 2：`VoiceActivityDetector::process_audio_chunk`
+
+当前目标不是重写它，而是确认它在新缓冲策略下仍然工作正常。
+
+实施 checklist：
+
+1. 保持输入仍然是单个 `hop_size` 块
+2. 确认 `samples_processed_count` 仍正确累积
+3. 确认 `look_behind_audio_buffer` 行为不变
+4. 确认 `previous_is_voice` 状态机不变
+
+#### 重点函数 3：`VoiceActivityDetector::start` / `stop`
+
+如果提交 3 引入了新缓冲字段或索引变量，必须同步检查：
+
+1. `start()` 是否完整重置新状态
+2. `stop()` 是否仍能让最后一句自然完成
+3. remainder 和活动段状态是否都被正确清空或收尾
+
+#### 提交 3 完成后需要人工复查的函数
+
+- `on_voice_start`
+- `on_voice_continuing`
+- `on_voice_end`
+
+复查目的：
+
+- 确保 segment 的开始、持续和结束语义没有被缓冲重构破坏
+
+### 提交 4 的函数级 checklist：Python ARM 输入快路径预留
+
+#### 提交 4 涉及文件
+
+- `python/src/moonshine_voice/transcriber.py`
+
+可选联动文档：
+
+- `README.md`
+- ARM 相关文档
+
+#### 重点函数 1：`Stream.add_audio`
+
+当前要解决的问题：
+
+- 始终走 `(ctypes.c_float * len(audio_data))(*audio_data)`
+- 无法利用 `numpy.ndarray(float32 contiguous)` 的天然连续内存
+
+实施 checklist：
+
+1. 先增加输入类型分支判断
+2. 对 `numpy.ndarray` 快路径，要求：
+   - `dtype == float32`
+   - contiguous
+3. 对不满足条件的 numpy 输入，先安全降级到现有路径
+4. 对普通 Python list 保持原有行为
+5. 不要让新路径影响 `self._stream_time` 逻辑
+
+建议实现方式：
+
+1. 抽一个私有 helper，例如 `_coerce_audio_buffer(...)`
+2. `Stream.add_audio()` 与后续可能的离线路径共用
+
+#### 重点函数 2：`Transcriber.transcribe_without_streaming`
+
+虽然本提交的主要目标是实时路径，但如果已经引入统一 helper，建议顺手评估这里是否也能受益。
+
+实施 checklist：
+
+1. 先确认 helper 是否可以复用
+2. 如果复用成本低，则同步接入
+3. 如果复用会扩大风险，则本提交先不动
+
+#### 提交 4 完成后需要人工复查的函数
+
+- `Stream.add_audio`
+- `Transcriber.transcribe_without_streaming`
+
+复查目的：
+
+- 确认 numpy 快路径和 list 慢路径行为一致
+
+### 四个提交都通用的“不要顺手改”原则
+
+为了保证这 4 个提交都能独立验证，下面这些事情建议明确不要混进去：
+
+1. 不要在提交 1 里改 C++ 核心逻辑
+2. 不要在提交 2 里顺手改 VAD 状态机
+3. 不要在提交 3 里顺手调参数默认值
+4. 不要在提交 4 里顺手改事件系统
+5. 不要把文档大改和代码大改混进同一个提交
+
 ## 13. 每个提交建议附带的最小验证清单
 
 为了直接进入实施前准备，下面把每个提交要跑的最小验证也定下来。
