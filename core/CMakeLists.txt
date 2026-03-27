@@ -212,6 +212,25 @@ target_link_libraries(benchmark PRIVATE
     moonshine
 )
 
+add_executable(ort-thread-benchmark ort-thread-benchmark.cpp)
+set_target_properties(ort-thread-benchmark PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED YES
+    CXX_EXTENSIONS NO
+)
+target_include_directories(ort-thread-benchmark PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}
+    ${CMAKE_CURRENT_LIST_DIR}/moonshine-utils
+    ${CMAKE_CURRENT_LIST_DIR}/ort-utils
+    ${CMAKE_CURRENT_LIST_DIR}/bin-tokenizer
+    ${CMAKE_CURRENT_LIST_DIR}/third-party/onnxruntime/include
+    ${CMAKE_CURRENT_LIST_DIR}/third-party/utf-8/
+)
+target_link_libraries(ort-thread-benchmark PRIVATE
+    moonshine
+    moonshine-utils
+)
+
 # Windows DLLs don't export all symbols by default and so tests that rely on them
 # are skipped for shared builds.
 if (NOT WIN32 OR NOT MOONSHINE_BUILD_SHARED)

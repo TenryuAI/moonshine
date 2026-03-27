@@ -143,7 +143,9 @@ void MoonshineStreamingState::reset(const MoonshineStreamingConfig &cfg) {
  * ============================================================================
  */
 
-MoonshineStreamingModel::MoonshineStreamingModel(bool log_ort_run)
+MoonshineStreamingModel::MoonshineStreamingModel(bool log_ort_run,
+                                                 int32_t ort_intra_op_threads,
+                                                 int32_t ort_inter_op_threads)
     : frontend_session(nullptr),
       encoder_session(nullptr),
       adapter_session(nullptr),
@@ -161,6 +163,14 @@ MoonshineStreamingModel::MoonshineStreamingModel(bool log_ort_run)
   ort_allocator = new MoonshineOrtAllocator(ort_memory_info);
 
   LOG_ORT_ERROR(ort_api, ort_api->CreateSessionOptions(&ort_session_options));
+  if (ort_intra_op_threads > 0) {
+    LOG_ORT_ERROR(ort_api, ort_api->SetIntraOpNumThreads(
+                               ort_session_options, ort_intra_op_threads));
+  }
+  if (ort_inter_op_threads > 0) {
+    LOG_ORT_ERROR(ort_api, ort_api->SetInterOpNumThreads(
+                               ort_session_options, ort_inter_op_threads));
+  }
   LOG_ORT_ERROR(ort_api, ort_api->SetSessionGraphOptimizationLevel(
                              ort_session_options, ORT_ENABLE_ALL));
 

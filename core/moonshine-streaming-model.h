@@ -108,7 +108,9 @@ struct MoonshineStreamingModel {
   int cross_attn_enc_len = 0;
   int cross_attn_steps = 0;  // total layer*step entries collected
 
-  MoonshineStreamingModel(bool log_ort_run = false);
+  MoonshineStreamingModel(bool log_ort_run = false,
+                          int32_t ort_intra_op_threads = 0,
+                          int32_t ort_inter_op_threads = 0);
   ~MoonshineStreamingModel();
 
   int load(const char *model_dir, const char *tokenizer_path,

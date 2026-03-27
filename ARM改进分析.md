@@ -409,7 +409,332 @@ Moonshine 已经有不少可调参数，但对 ARM 场景没有形成明确 prof
 
 在当前阶段，先把显而易见的拷贝和缓冲问题解决，收益通常更确定。
 
-## 12.5 根据反馈修订后的方案细化
+### 12.3 当前仓库里真实存在的 P2 入口
+
+如果只看代码现状，而不是只看理想方向，当前仓库里与 `P2` 最相关的事实有这些：
+
+- **主模型和流式模型仍然只走 ORT CPU 路径**  
+  目前没有看到项目代码里显式调用 `SessionOptionsAppendExecutionProvider...` 或通用 `SessionOptionsAppendExecutionProvider(...)` 去挂接 NNAPI、XNNPACK、CoreML 等执行后端。
+
+- **仓库自带的 ONNX Runtime 头文件已经具备能力声明**  
+  `core/third-party/onnxruntime/include/onnxruntime_c_api.h` 明确声明了通用 provider API；  
+  `core/third-party/onnxruntime/include/nnapi_provider_factory.h` 也存在，说明“从 API 能力上看”项目所在 ORT 版本具备 NNAPI 入口。
+
+- **XNNPACK 在当前仓库里没有现成接入代码**  
+  头文件目录里没有独立的 `xnnpack_provider_factory.h`，但 ORT 通用 provider API 文档提到了 `XNNPACK`。这说明若要接入，更可能走：
+  - 通用 `SessionOptionsAppendExecutionProvider(...)`
+  - provider name 方式
+
+- **线程策略目前不统一**
+  - `core/silero-vad.cpp`：显式把 `SetIntraOpNumThreads` 和 `SetInterOpNumThreads` 都设为 `1`
+  - `core/gemma-embedding-model.cpp`：显式把 `SetIntraOpNumThreads` 设为 `1`
+  - `core/moonshine-model.cpp`：没有显式设置线程数，但设置了 `ORT_ENABLE_EXTENDED`、`DisableCpuMemArena`、`session.disable_prepacking`
+  - `core/moonshine-streaming-model.cpp`：启用了 `ORT_ENABLE_ALL`，但没有显式线程配置
+
+- **Android 当前平台面很收敛**
+  `build.gradle.kts` 里目前只保留了 `arm64-v8a`，这意味着如果后续做 NNAPI 或 Android ARM 侧 provider 试验，验证面相对可控，不需要同时兼顾多个 ABI。
+
+这些事实很重要，因为它们说明：
+
+1. `P2` 不是从零开始
+2. 但也远没有到“只差开个开关”的程度
+3. 当前最现实的 `P2` 形态，是**先做线程策略与 provider 接入预研，再决定是否进入真实集成**
+
+### 12.4 P2 的几条可行路线对比
+
+下面按“实现难度 / 风险 / 潜在收益”来做一个更实际的对比。
+
+| 路线 | 当前仓库支撑度 | 预期收益 | 风险 | 建议优先级 |
+| --- | --- | --- | --- | --- |
+| ORT 线程策略调优 | 高 | 中到高 | 中 | 最高 |
+| NNAPI 试验接入 | 中 | Android ARM 上可能较高 | 高 | 中 |
+| XNNPACK 试验接入 | 中偏低 | CPU 场景可能有帮助 | 高 | 中偏后 |
+| 更细的日志/运行档位分层 | 高 | 中 | 低 | 高 |
+| 直接大规模更换执行后端 | 低 | 不确定 | 很高 | 最低 |
+
+#### 路线一：ORT 线程策略调优
+
+这是最适合先做的 `P2` 路线。
+
+原因：
+
+- 不需要先引入新的 provider
+- 只是在现有 ORT CPU 路径上做更合理的线程策略
+- 可以先从最小实验开始，不破坏主链
+
+优先关注文件：
+
+- `core/moonshine-model.cpp`
+- `core/moonshine-streaming-model.cpp`
+- `core/silero-vad.cpp`
+- `core/gemma-embedding-model.cpp`
+
+优先关注问题：
+
+- 为什么 VAD / Gemma embedding 固定为 1 线程，而主模型没有统一策略
+- 主模型和流式模型是否应该允许：
+  - 单线程
+  - 小核友好
+  - “低延迟优先” 与 “吞吐优先” 两种模式
+
+#### 路线二：NNAPI 试验接入
+
+这条路线更偏 Android ARM。
+
+当前有利条件：
+
+- 仓库里已经有 `nnapi_provider_factory.h`
+- Android 当前只打 `arm64-v8a`
+
+主要风险：
+
+- 真正可用与否取决于当前打包的 ORT 是否带对应 provider
+- 就算 API 在头文件里存在，也不代表当前分发的二进制具备完整支持
+- 不同 Android 设备 / SoC / 驱动差异很大，回归面会变宽
+
+所以更合理的做法不是直接接入，而是：
+
+1. 先确认当前 ORT 二进制是否支持 NNAPI provider
+2. 再做一个最小 Android 分支实验
+3. 最后才考虑是否进入主线
+
+#### 路线三：XNNPACK 试验接入
+
+这条路线理论上对 CPU 场景更有吸引力，但当前仓库的显式支撑度比 NNAPI 还弱一点。
+
+原因：
+
+- 仓库没有独立的 XNNPACK provider factory 头文件
+- 只能看到 ORT 的通用 provider API 文档中提到了 `XNNPACK`
+
+因此这条路线更适合放在：
+
+- ORT 线程调优之后
+- 并且在明确 ORT 二进制具备相关能力之后
+
+### 12.5 P2 最推荐的实施顺序
+
+如果真的进入 `P2`，我建议按下面顺序推进，而不是直接去改 Android provider：
+
+1. **先做 ORT 线程策略预研**
+2. **再做更细的运行 profile / 日志档位**
+3. **然后做 Android NNAPI 最小试验**
+4. **最后才考虑 XNNPACK 或更深 provider 路线**
+
+这样做的原因是：
+
+- 线程策略更容易复用到所有 ARM 平台
+- provider 接入一旦失败，问题定位通常更难
+- 先把 CPU 路径调顺，才能判断 provider 的真实增益
+
+### 12.6 P2 最小实验计划
+
+如果下一步继续做 `P2`，建议不要直接改正式主路径，而是先做几组小实验。
+
+#### 实验 A：主模型 / 流式模型线程数实验
+
+目标：
+
+- 比较 1 线程、2 线程、默认线程在 ARM 上的收益和抖动
+
+建议最小改动点：
+
+- `core/moonshine-model.cpp`
+- `core/moonshine-streaming-model.cpp`
+
+观察指标：
+
+- `transcribe_stream()` 平均耗时
+- `LineCompleted` 延迟
+- CPU 峰值
+- 长时间运行稳定性
+
+#### 实验 B：VAD 与主模型的线程协同
+
+目标：
+
+- 确认 VAD 固定 1 线程是否仍是最优
+- 评估 VAD 和主模型线程策略是否需要分离
+
+建议最小改动点：
+
+- `core/silero-vad.cpp`
+
+观察指标：
+
+- VAD 调用耗时
+- 整体转写尾延迟
+- 小设备上的抖动
+
+#### 实验 C：Android NNAPI feasibility spike
+
+目标：
+
+- 验证当前 ORT 分发物是否真的能附加 NNAPI provider
+
+建议最小改动点：
+
+- Android 路径中新建一个实验分支
+- 不直接改主线默认行为
+
+成功标准：
+
+- 能在 Android 上成功挂载 provider
+- 能正常推理
+- 相比 CPU 路径确实有收益
+
+失败也有价值，因为它能明确告诉我们：
+
+- 问题出在 ORT 构建
+- 还是问题出在接入路径
+
+### 12.7 P2 的前置条件
+
+在正式投入 `P2` 前，建议先确认以下条件已经满足：
+
+1. P0 的主链优化已经稳定
+2. 至少有一台可重复测量的 ARM 目标设备
+3. 已经定义好统一的验收指标
+4. Android / Linux ARM 两条验证路径不要同时起步
+
+否则很容易出现：
+
+- 改了很多地方
+- 但不知道收益来自哪里
+- 也不知道回归来自哪里
+
+### 12.8 P2 的最小实验入口已经具备
+
+经过前面的改动，当前仓库已经具备一个很适合做 `P2` 第一阶段实验的入口：
+
+- `TranscriberOptions` 已支持：
+  - `ort_intra_op_threads`
+  - `ort_inter_op_threads`
+- 这些参数已经能从 `moonshine-c-api.cpp` 的 option 解析链路进入
+- 主模型 `MoonshineModel`
+- 流式模型 `MoonshineStreamingModel`
+  都已经支持在显式传参时覆盖 ORT 线程数
+
+这意味着现在可以直接做下列对比，而不需要再改默认主链：
+
+1. 默认线程配置
+2. `ort_intra_op_threads=1`
+3. `ort_intra_op_threads=2`
+4. `ort_intra_op_threads=1,ort_inter_op_threads=1`
+
+当前最小实验入口有两个：
+
+- **Python CLI**
+  - `python -m moonshine_voice.transcriber --options="ort_intra_op_threads=1"`
+- **程序化调用**
+  - `Transcriber(..., options={"ort_intra_op_threads": "1"})`
+
+这一步很重要，因为它把 `P2` 从“研究方向”变成了“现在就可以跑的实验路径”。
+
+### 12.9 第一轮线程实验建议怎么做
+
+建议先做一轮非常保守的线程实验，不要同时改太多参数。
+
+#### 实验顺序
+
+1. 默认配置
+2. 仅 `ort_intra_op_threads=1`
+3. 仅 `ort_intra_op_threads=2`
+4. `ort_intra_op_threads=1,ort_inter_op_threads=1`
+
+#### 保持不变的条件
+
+实验时建议以下条件固定：
+
+- 同一个模型
+- 同一段测试音频
+- 同一设备
+- 同样的 `transcription_interval`
+- 同样的 `vad_threshold`
+- speaker / word timestamps 开关状态不变
+
+#### 第一轮重点看什么
+
+第一轮实验不必追求绝对性能极限，先看这几个问题：
+
+1. 线程参数切换后是否稳定运行
+2. `LineCompleted` 延迟是否明显变化
+3. CPU 峰值是否下降或抖动是否减轻
+4. 是否出现更明显的中间态抖动
+
+如果连“稳定切换线程配置”都做不到，就还不应该进入 NNAPI/XNNPACK 方向。
+
+### 12.10 第一轮线程 smoke test 结果
+
+为了确认这条 `P2` 路线不只是“纸面可行”，当前仓库已经新增了一个最小实验目标：
+
+- `core/ort-thread-benchmark.cpp`
+
+它直接使用：
+
+- `test-assets/tiny-en`
+- `test-assets/two_cities.wav`
+
+来跑主模型线程参数对比。
+
+本轮第一批结果是在**当前开发机**上得到的，目的主要是：
+
+- 验证线程参数链路是否生效
+- 验证实验入口是否稳定
+- 粗略观察“默认 / 单线程 / 双线程”的趋势
+
+这**不是 ARM 实机结论**，但它足以证明后续 ARM 实验值得继续。
+
+#### 本轮测试配置
+
+- 模型：`tiny-en`
+- wav：`two_cities.wav`
+- `model_arch = MOONSHINE_MODEL_ARCH_TINY`
+- 固定 `transcription_interval`
+- 关闭 `identify_speakers`
+- 关闭 `return_audio_data`
+
+#### 第一轮结果
+
+| 配置 | lines | avg latency | elapsed | load |
+| --- | --- | --- | --- | --- |
+| 默认线程 | 13 | 93ms | 7.85s | 17.69% |
+| `ort_intra_op_threads=1, ort_inter_op_threads=1` | 13 | 84ms | 6.69s | 15.08% |
+| `ort_intra_op_threads=1` | 13 | 85ms | 6.94s | 15.64% |
+| `ort_intra_op_threads=2` | 13 | 67ms | 5.63s | 12.69% |
+
+#### 从这批结果能得出的结论
+
+1. 线程参数入口已经真实生效，而不是只停留在代码里
+2. 默认线程配置并不天然最优
+3. 在当前开发机上，`ort_intra_op_threads=2` 这一组明显优于默认配置
+4. 这说明继续在 ARM 设备上做同样的 4 组对比是有价值的
+
+#### 当前还不能直接下的结论
+
+这批结果还不能直接推出：
+
+- ARM 上 2 线程一定最好
+- `inter_op_threads` 一定应该固定成 1
+- 所有模型都适合同样的线程策略
+
+因为这些都必须在真实目标设备上验证。
+
+#### 这批 smoke test 的真正意义
+
+这批结果最重要的意义不是“已经选出最优线程数”，而是：
+
+- 线程调优路线是成立的
+- 线程调优收益不是理论上的
+- 下一步做 ARM 实机实验不会白费
+
+所以接下来的合理动作，不是立刻把 `2` 线程写成默认值，而是：
+
+1. 在真实 ARM 设备上复跑同样的 4 组
+2. 保持其它变量不变
+3. 根据设备结果决定是否要进一步做 profile 固化
+
+## 12.11 根据反馈修订后的方案细化
 
 结合你给出的补充意见，当前方案还可以进一步明确成“**问题 -> 代码落点 -> 建议改法 -> ARM 收益**”四段式。下面是更可执行的一版。
 
@@ -644,7 +969,7 @@ ARM 收益：
 - `ARM改进分析.md`
 - 未来可扩展到 `原理及工作流程.md`
 
-## 12.6 建议新增一套“ARM 优化验收指标”
+## 12.12 建议新增一套“ARM 优化验收指标”
 
 如果方案要从分析走向实施，最好补一组统一指标，否则后续优化容易变成主观判断。
 

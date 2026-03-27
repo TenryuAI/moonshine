@@ -763,6 +763,14 @@ Handles the speech to text pipeline.
     - `identify_speakers`: A boolean that controls whether to run the speaker identification stage in the pipeline.
     - `return_audio_data`: By default the transcriber returns the segment of audio data corresponding to a line of text along with the transcription. You can disable this if you want to reduce memory overhead.
     - `log_output_text`: If this is enabled then the results of the speech to text model will be logged to the console.
+    - `ort_intra_op_threads`: Experimental tuning option for ONNX Runtime on CPU. When set to a value greater than zero, this overrides the number of threads ORT uses inside a single operator for the main transcription model. This can be useful when comparing 1-thread, 2-thread, and default behavior on ARM devices.
+    - `ort_inter_op_threads`: Experimental tuning option for ONNX Runtime on CPU. When set to a value greater than zero, this overrides the number of threads ORT uses across operators for the main transcription model. This is mainly useful for platform tuning and should be benchmarked on your target hardware before using it in production.
+
+For example, to run the built-in transcriber example with a single-threaded ORT configuration on the main transcription model:
+
+```bash
+python -m moonshine_voice.transcriber --language en --options="ort_intra_op_threads=1,ort_inter_op_threads=1"
+```
 
 - <a id="transcriber-transcribe-without-streaming"></a>`transcribe_without_streaming()`: A convenience function to extract text from a non-live audio source, such as a file. We optimize for streaming use cases, so you're probably better off using libraries that specialize in bulk, batched transcription if you use this a lot and have performance constraints. This will still call any registered event listeners as it processes the lines, so this can be useful to test your application using pre-recorded files, or to easily integrate offline audio sources.
   - `audio_data`: An array of 32-bit float values, representing mono PCM audio between -1.0 and 1.0, to be analyzed for speech.

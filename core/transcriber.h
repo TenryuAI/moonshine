@@ -121,6 +121,8 @@ struct TranscriberOptions {
   float vad_max_segment_duration = 15.0f;
   float max_tokens_per_second = 6.5f;
   float speaker_id_cluster_threshold = 0.6f;
+  int32_t ort_intra_op_threads = 0;
+  int32_t ort_inter_op_threads = 0;
   std::string save_input_wav_path = "";
   bool log_ort_run = false;
   bool return_audio_data = true;

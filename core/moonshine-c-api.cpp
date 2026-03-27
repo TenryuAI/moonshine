@@ -99,6 +99,10 @@ void parse_transcriber_options(const transcriber_option_t *in_options,
       out_options.vad_max_segment_duration = float_from_string(in_option.value);
     } else if (option_name == "max_tokens_per_second") {
       out_options.max_tokens_per_second = float_from_string(in_option.value);
+    } else if (option_name == "ort_intra_op_threads") {
+      out_options.ort_intra_op_threads = int32_from_string(in_option.value);
+    } else if (option_name == "ort_inter_op_threads") {
+      out_options.ort_inter_op_threads = int32_from_string(in_option.value);
     } else if (option_name == "identify_speakers") {
       out_options.identify_speakers = bool_from_string(in_option.value);
     } else if (option_name == "speaker_id_cluster_threshold") {

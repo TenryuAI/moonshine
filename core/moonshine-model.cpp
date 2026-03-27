@@ -79,7 +79,9 @@ int set_model_options_from_arch(MoonshineModel *model, int32_t model_arch) {
 }
 }  // namespace
 
-MoonshineModel::MoonshineModel(bool log_ort_run, float max_tokens_per_second)
+MoonshineModel::MoonshineModel(bool log_ort_run, float max_tokens_per_second,
+                               int32_t ort_intra_op_threads,
+                               int32_t ort_inter_op_threads)
     : encoder_session(nullptr),
       decoder_session(nullptr),
       tokenizer(nullptr),
@@ -100,6 +102,14 @@ MoonshineModel::MoonshineModel(bool log_ort_run, float max_tokens_per_second)
   ort_string_allocator = new MoonshineOrtAllocator(ort_memory_info);
 
   LOG_ORT_ERROR(ort_api, ort_api->CreateSessionOptions(&ort_session_options));
+  if (ort_intra_op_threads > 0) {
+    LOG_ORT_ERROR(ort_api, ort_api->SetIntraOpNumThreads(
+                               ort_session_options, ort_intra_op_threads));
+  }
+  if (ort_inter_op_threads > 0) {
+    LOG_ORT_ERROR(ort_api, ort_api->SetInterOpNumThreads(
+                               ort_session_options, ort_inter_op_threads));
+  }
   LOG_ORT_ERROR(ort_api, ort_api->SetSessionGraphOptimizationLevel(
                              ort_session_options, ORT_ENABLE_EXTENDED));
   LOG_ORT_ERROR(ort_api,
