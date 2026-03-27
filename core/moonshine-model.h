@@ -63,7 +63,10 @@ struct MoonshineModel {
 
   MoonshineModel(bool log_ort_run = false, float max_tokens_per_second = 6.5f,
                  int32_t ort_intra_op_threads = 0,
-                 int32_t ort_inter_op_threads = 0);
+                 int32_t ort_inter_op_threads = 0,
+                 bool ort_use_nnapi = false,
+                 bool ort_nnapi_use_fp16 = false,
+                 bool ort_nnapi_cpu_disabled = false);
   ~MoonshineModel();
 
   int load(const char *encoder_model_path, const char *decoder_model_path,

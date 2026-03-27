@@ -197,4 +197,34 @@ public class TranscriberTest {
         assertTrue(allText.contains("best of times"));
         assertTrue(allText.contains("worst of times"));
     }
+
+    @Test
+    public void testMoonshineTranscriberWithoutStreamingWithNnapiOption() {
+        Context testContext = InstrumentationRegistry.getInstrumentation().getContext();
+        Utils.WavData wavData = null;
+        try {
+            wavData = Utils.loadWavFromAssets(testContext, "two_cities.wav");
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+        assertTrue(wavData.data != null);
+        assertTrue(wavData.data.length > 0);
+
+        Utils.copyAssetToTempDir(testContext, tempDir, "tiny-en/encoder_model.ort");
+        Utils.copyAssetToTempDir(testContext, tempDir, "tiny-en/decoder_model_merged.ort");
+        Utils.copyAssetToTempDir(testContext, tempDir, "tiny-en/tokenizer.bin");
+        final String modelsPath = tempDir.toAbsolutePath().toString() + "/tiny-en/";
+
+        List<TranscriberOption> options = new ArrayList<>();
+        options.add(new TranscriberOption("ort_use_nnapi", "true"));
+        options.add(new TranscriberOption("ort_nnapi_use_fp16", "true"));
+
+        Transcriber transcriber = new Transcriber(options);
+        transcriber.loadFromFiles(modelsPath, JNI.MOONSHINE_MODEL_ARCH_TINY);
+
+        final Transcript transcript =
+            transcriber.transcribeWithoutStreaming(wavData.data, wavData.sampleRate);
+        assertTrue(transcript != null);
+        assertTrue(transcript.lines.size() > 0);
+    }
 }

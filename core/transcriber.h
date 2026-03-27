@@ -123,6 +123,9 @@ struct TranscriberOptions {
   float speaker_id_cluster_threshold = 0.6f;
   int32_t ort_intra_op_threads = 0;
   int32_t ort_inter_op_threads = 0;
+  bool ort_use_nnapi = false;
+  bool ort_nnapi_use_fp16 = false;
+  bool ort_nnapi_cpu_disabled = false;
   std::string save_input_wav_path = "";
   bool log_ort_run = false;
   bool return_audio_data = true;

@@ -129,6 +129,8 @@ These are only starting points, but they map well to the most common edge-device
 - Richer metadata such as speaker IDs and word timings increases both compute and memory pressure.
 - Low-power deployments benefit most from smaller models, fewer updates, and fewer optional features.
 
+One concrete data point from our current ARM experiments: on a 4-core Cortex-A55 RK356x device, the default ORT threading remained a strong baseline for `tiny-en`, while `tiny-streaming-en` improved slightly with `ort_intra_op_threads=3`. Treat this as a **device-specific starting point**, not a universal recommendation - the right thread settings should still be validated on your actual target hardware.
+
 If you need to reproduce an ARM build rather than consume a prebuilt package, the current project structure supports three practical workflows:
 
 1. **Build directly on the target device**. This is the most reliable option for Raspberry Pi and generic Linux `aarch64` systems because it automatically matches the target libc, CPU, and ONNX Runtime binaries expected by the release scripts.
@@ -765,11 +767,20 @@ Handles the speech to text pipeline.
     - `log_output_text`: If this is enabled then the results of the speech to text model will be logged to the console.
     - `ort_intra_op_threads`: Experimental tuning option for ONNX Runtime on CPU. When set to a value greater than zero, this overrides the number of threads ORT uses inside a single operator for the main transcription model. This can be useful when comparing 1-thread, 2-thread, and default behavior on ARM devices.
     - `ort_inter_op_threads`: Experimental tuning option for ONNX Runtime on CPU. When set to a value greater than zero, this overrides the number of threads ORT uses across operators for the main transcription model. This is mainly useful for platform tuning and should be benchmarked on your target hardware before using it in production.
+    - `ort_use_nnapi`: Android-only experimental option. When set to `true`, Moonshine will attempt to attach the NNAPI execution provider to the main transcription model sessions. This is intended for provider feasibility experiments, not as a guaranteed production default.
+    - `ort_nnapi_use_fp16`: Android-only experimental option. Only meaningful when `ort_use_nnapi=true`. Requests fp16 relaxation in the NNAPI execution provider, which may improve performance at the cost of some precision.
+    - `ort_nnapi_cpu_disabled`: Android-only experimental option. Only meaningful when `ort_use_nnapi=true`. Prevents NNAPI from falling back to its own CPU implementation, which can be useful when you want unsupported operators to stay on ORT's CPU kernels instead.
 
 For example, to run the built-in transcriber example with a single-threaded ORT configuration on the main transcription model:
 
 ```bash
 python -m moonshine_voice.transcriber --language en --options="ort_intra_op_threads=1,ort_inter_op_threads=1"
+```
+
+And for an Android NNAPI feasibility experiment, the equivalent option set would look like:
+
+```text
+ort_use_nnapi=true,ort_nnapi_use_fp16=true
 ```
 
 - <a id="transcriber-transcribe-without-streaming"></a>`transcribe_without_streaming()`: A convenience function to extract text from a non-live audio source, such as a file. We optimize for streaming use cases, so you're probably better off using libraries that specialize in bulk, batched transcription if you use this a lot and have performance constraints. This will still call any registered event listeners as it processes the lines, so this can be useful to test your application using pre-recorded files, or to easily integrate offline audio sources.

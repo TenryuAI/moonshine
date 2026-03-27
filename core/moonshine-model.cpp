@@ -20,6 +20,9 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
+#if defined(ANDROID)
+#include "nnapi_provider_factory.h"
+#endif
 
 #include <algorithm>
 #include <array>
@@ -77,11 +80,33 @@ int set_model_options_from_arch(MoonshineModel *model, int32_t model_arch) {
   }
   return 0;
 }
+
+#if defined(ANDROID)
+void maybe_enable_nnapi(const OrtApi *ort_api, OrtSessionOptions *session_options,
+                        bool ort_use_nnapi, bool ort_nnapi_use_fp16,
+                        bool ort_nnapi_cpu_disabled) {
+  if (!ort_use_nnapi) {
+    return;
+  }
+  uint32_t nnapi_flags = NNAPI_FLAG_USE_NONE;
+  if (ort_nnapi_use_fp16) {
+    nnapi_flags |= NNAPI_FLAG_USE_FP16;
+  }
+  if (ort_nnapi_cpu_disabled) {
+    nnapi_flags |= NNAPI_FLAG_CPU_DISABLED;
+  }
+  LOG_ORT_ERROR(ort_api, OrtSessionOptionsAppendExecutionProvider_Nnapi(
+                             session_options, nnapi_flags));
+}
+#endif
 }  // namespace
 
 MoonshineModel::MoonshineModel(bool log_ort_run, float max_tokens_per_second,
                                int32_t ort_intra_op_threads,
-                               int32_t ort_inter_op_threads)
+                               int32_t ort_inter_op_threads,
+                               bool ort_use_nnapi,
+                               bool ort_nnapi_use_fp16,
+                               bool ort_nnapi_cpu_disabled)
     : encoder_session(nullptr),
       decoder_session(nullptr),
       tokenizer(nullptr),
@@ -110,6 +135,10 @@ MoonshineModel::MoonshineModel(bool log_ort_run, float max_tokens_per_second,
     LOG_ORT_ERROR(ort_api, ort_api->SetInterOpNumThreads(
                                ort_session_options, ort_inter_op_threads));
   }
+#if defined(ANDROID)
+  maybe_enable_nnapi(ort_api, ort_session_options, ort_use_nnapi,
+                     ort_nnapi_use_fp16, ort_nnapi_cpu_disabled);
+#endif
   LOG_ORT_ERROR(ort_api, ort_api->SetSessionGraphOptimizationLevel(
                              ort_session_options, ORT_ENABLE_EXTENDED));
   LOG_ORT_ERROR(ort_api,

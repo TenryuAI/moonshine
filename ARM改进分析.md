@@ -452,6 +452,44 @@ Moonshine 已经有不少可调参数，但对 ARM 场景没有形成明确 prof
 | 更细的日志/运行档位分层 | 高 | 中 | 低 | 高 |
 | 直接大规模更换执行后端 | 低 | 不确定 | 很高 | 最低 |
 
+当前仓库里，NNAPI feasibility spike 的最小入口也已经具备：
+
+- `TranscriberOptions` 已可接收：
+  - `ort_use_nnapi`
+  - `ort_nnapi_use_fp16`
+  - `ort_nnapi_cpu_disabled`
+- 这些参数已经能进入：
+  - `MoonshineModel`
+  - `MoonshineStreamingModel`
+- 当前实现只在 **Android** 编译路径下生效
+- 当前实现只影响**主转写模型会话**
+  - 不影响 VAD
+  - 不影响 speaker embedding
+  - 不影响 Gemma embedding
+
+这意味着现在已经可以做一个非常保守的 Android provider 试验，而不需要先改默认主链行为。
+
+当前 Android 侧还有一个现实阻断需要明确记录：
+
+- 本地代码已经具备 NNAPI 最小实验入口
+- Android instrumentation test 也已经补好
+- 但在当前这台开发机上：
+  - 没有可用的 `adb`
+  - 没有已连接 Android 设备
+  - `./gradlew :android:compileDebugAndroidTestJavaWithJavac` 目前还会卡在 Android Gradle Plugin 解析阶段
+
+也就是说，当前已经完成的是：
+
+- **代码接入完成**
+- **Android 测试入口完成**
+- **本地静态审查完成**
+
+但还没有完成：
+
+- **Android 设备上的实际 NNAPI provider 可用性验证**
+
+这不是代码逻辑阻断，而是本地 Android 运行环境阻断。
+
 #### 路线一：ORT 线程策略调优
 
 这是最适合先做的 `P2` 路线。
@@ -734,7 +772,204 @@ Moonshine 已经有不少可调参数，但对 ARM 场景没有形成明确 prof
 2. 保持其它变量不变
 3. 根据设备结果决定是否要进一步做 profile 固化
 
-## 12.11 根据反馈修订后的方案细化
+### 12.11 第一轮 ARM 实机线程实验结果
+
+在完成开发机构建与 smoke test 后，已经进一步通过 SSH 在一台真实 ARM Linux 设备上完成了部署、编译和最小线程实验。
+
+本次远端实验环境要点：
+
+- 设备：`rock@192.168.0.100`
+- 架构：`aarch64`
+- 系统：Linux 5.10 RK356x
+- 原生 `cmake` 版本过低（3.18.4），已通过 `python3 -m pip install --user cmake` 在用户目录补到可用版本
+- 已将最小实验所需的 `core/` 与 `test-assets/` 同步到远端
+- 已在远端编译并运行：
+  - `ort-thread-benchmark`
+
+本轮 ARM 实机实验继续使用：
+
+- 模型：`tiny-en`
+- wav：`two_cities.wav`
+- `model_arch = MOONSHINE_MODEL_ARCH_TINY`
+
+#### ARM 实机结果
+
+| 配置 | lines | avg latency | elapsed | load |
+| --- | --- | --- | --- | --- |
+| 默认线程 | 13 | 1152ms | 92.88s | 209.32% |
+| `ort_intra_op_threads=1` | 13 | 2786ms | 216.84s | 488.67% |
+| `ort_intra_op_threads=2` | 13 | 1646ms | 131.26s | 295.80% |
+| `ort_intra_op_threads=1, ort_inter_op_threads=1` | 13 | 2837ms | 222.03s | 500.36% |
+
+#### 这批 ARM 结果和开发机结果的差异
+
+这批结果最重要的一点，是它和开发机 smoke test 的趋势**并不相同**：
+
+- 在开发机上，`ort_intra_op_threads=2` 明显优于默认
+- 在这台 ARM 实机上，**默认线程反而是四组里最好的**
+- 强行把主模型压成 `1` 线程，性能明显变差
+- `intra=1, inter=1` 这一组在 ARM 上也是最差的一档
+
+这正好说明了一个关键结论：
+
+**线程策略不能从开发机结果直接外推到 ARM 设备。**
+
+也就是说：
+
+- `P2` 的实验路线是对的
+- 但 profile 固化必须以目标 ARM 设备的实测结果为准
+
+#### 当前能得出的更可靠结论
+
+1. `ort_intra_op_threads` / `ort_inter_op_threads` 的代码入口已经真实可用
+2. 不同平台对线程配置的响应差异很大
+3. ARM 实机上“少线程更好”并不是普遍规律
+4. 对这台 RK356x 设备而言，当前默认线程配置优于本轮测试中的 1 线程和 2 线程实验值
+
+#### 当前还不能下的结论
+
+这轮结果还不能直接推出：
+
+- 所有 ARM 设备默认线程都最好
+- RK356x 上永远不需要调线程
+- 其它模型（比如 streaming small / medium）也会出现同样趋势
+
+因为这轮实验只覆盖了：
+
+- 一个设备
+- 一个模型
+- 一段音频
+- 少量线程组合
+
+#### 关于 GPU discovery warning
+
+远端实验日志里出现了 ORT 的 warning：
+
+- `GPU device discovery failed`
+- `/sys/class/drm/card0/device/vendor` 无法读取
+
+目前看这更像是 ORT 在做设备探测时的非致命告警，而不是本次实验失败原因，因为：
+
+- 所有 4 组实验都正常完成
+- 都产出了稳定的结果
+- 进程退出码为 `0`
+
+但它提示我们后续如果继续推进 `P2`，应该额外留意：
+
+- 是否需要抑制无用设备探测
+- 是否存在更适合嵌入式设备的 ORT 配置
+
+#### 这轮 ARM 实机实验的价值
+
+这轮实验最重要的价值是：
+
+- 证明远端 ARM 部署链已经打通
+- 证明 `ort-thread-benchmark` 能在真实 ARM 设备上运行
+- 证明线程策略实验必须在真实目标机上做，而不是只看开发机
+
+所以如果后续继续做 `P2`，下一步最值得做的不是立刻上 NNAPI，而是：
+
+1. 用同一台 ARM 设备继续扩充线程组合
+2. 分 streaming / non-streaming 模型分别测
+3. 再决定是否要把某些线程策略做成 profile 建议
+
+### 12.12 第一轮 ARM 实机 streaming 模型线程实验结果
+
+在完成 non-streaming tiny 模型实验后，又在同一台 ARM 设备上继续对 **`tiny-streaming-en`** 跑了同样的 4 组线程参数对比。
+
+这一步的目的，是确认：
+
+- streaming 模型是否会呈现不同的线程趋势
+- 线程策略是不是应该按模型形态区分
+
+本轮 streaming 实验环境保持不变：
+
+- 同一台 ARM 设备
+- 同一段 `two_cities.wav`
+- `model_arch = MOONSHINE_MODEL_ARCH_TINY_STREAMING`
+
+#### ARM 实机 streaming 结果
+
+| 配置 | lines | avg latency | elapsed | load |
+| --- | --- | --- | --- | --- |
+| 默认线程 | 13 | 955ms | 74.97s | 168.94% |
+| `ort_intra_op_threads=1` | 13 | 2274ms | 171.74s | 387.02% |
+| `ort_intra_op_threads=2` | 13 | 1522ms | 114.58s | 258.22% |
+| `ort_intra_op_threads=1, ort_inter_op_threads=1` | 13 | 2278ms | 171.97s | 387.55% |
+
+扩展矩阵补充结果：
+
+| 配置 | lines | avg latency | elapsed | load |
+| --- | --- | --- | --- | --- |
+| `ort_intra_op_threads=3` | 13 | 933ms | 72.88s | 164.23% |
+| `ort_intra_op_threads=4` | 13 | 959ms | 75.39s | 169.89% |
+
+#### 和 non-streaming ARM 结果对比后能看出的结论
+
+1. **streaming 模型整体比 non-streaming 更快**
+   - 默认线程下：
+     - non-streaming：`92.88s`
+     - streaming：`74.97s`
+
+2. **线程趋势和 non-streaming 基本一致**
+   - 默认线程依然最好
+   - `intra=1` 依然明显更差
+   - `intra=2` 仍然是介于两者之间
+
+3. **这台 ARM 设备上，“强行压线程”对 streaming 也没有带来收益**
+
+4. **在这台 4 核 Cortex-A55 设备上，streaming tiny 的当前最优点更接近 `intra=3`**
+
+这一点比前一轮结论更具体：
+
+- `intra=1`：明显过低，最差
+- `intra=2`：有改善，但仍明显落后于最优
+- `intra=3`：当前测试中最佳
+- `intra=4`：已经接近默认，但没有继续优于 `intra=3`
+
+#### 当前最重要的推论
+
+经过 non-streaming 和 streaming 两轮 ARM 实机测试后，可以先得到一个比之前更强的阶段性判断：
+
+**在这台 RK356x ARM 设备上，non-streaming tiny 的强基线仍是默认线程；而在 streaming tiny 上，扩展矩阵显示 `ort_intra_op_threads=3` 略优于默认线程。**
+
+这仍然不是“所有 ARM 平台通用”的最终结论，但已经足够说明：
+
+- 线程策略不能简单照搬开发机
+- 线程策略最好按真实目标设备做 profile
+- 默认策略至少在这台设备上是一个强基线
+
+#### 对后续 `P2` 的实际影响
+
+这批结果会影响后续路线判断：
+
+1. **不要急着把 1 线程或 2 线程写进默认值**
+2. streaming 路径在这台 ARM 机上，已经可以把 `intra=3` 作为下一轮重点候选
+3. 继续保留线程参数作为实验入口，而不是立即固化为全局默认值
+4. 如果后续继续实验，更值得扩充的是：
+   - 不同 `transcription_interval`
+   - 不同 streaming 模型尺寸
+   - streaming / non-streaming 是否需要分开给 profile
+
+#### 这批 streaming 实验的价值
+
+这批结果让 `P2` 的线程调优判断从：
+
+- “开发机上 2 线程看起来更好”
+
+变成了：
+
+- “真实 ARM 设备上，默认线程是强基线，但 streaming tiny 可能在 `intra=3` 上略优”
+
+这对后续是否继续推进 NNAPI/XNNPACK 也有意义，因为它说明：
+
+- 仅仅靠粗暴手动限线程，不一定能拿到更好结果
+- 如果要继续深挖性能，下一步更可能需要：
+  - 更细的线程矩阵
+  - 更具体的 ORT 行为分析
+  - 或转向 provider 级实验
+
+## 12.13 根据反馈修订后的方案细化
 
 结合你给出的补充意见，当前方案还可以进一步明确成“**问题 -> 代码落点 -> 建议改法 -> ARM 收益**”四段式。下面是更可执行的一版。
 
@@ -969,7 +1204,7 @@ ARM 收益：
 - `ARM改进分析.md`
 - 未来可扩展到 `原理及工作流程.md`
 
-## 12.12 建议新增一套“ARM 优化验收指标”
+## 12.14 建议新增一套“ARM 优化验收指标”
 
 如果方案要从分析走向实施，最好补一组统一指标，否则后续优化容易变成主观判断。
 

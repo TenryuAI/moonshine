@@ -110,7 +110,10 @@ struct MoonshineStreamingModel {
 
   MoonshineStreamingModel(bool log_ort_run = false,
                           int32_t ort_intra_op_threads = 0,
-                          int32_t ort_inter_op_threads = 0);
+                          int32_t ort_inter_op_threads = 0,
+                          bool ort_use_nnapi = false,
+                          bool ort_nnapi_use_fp16 = false,
+                          bool ort_nnapi_cpu_disabled = false);
   ~MoonshineStreamingModel();
 
   int load(const char *model_dir, const char *tokenizer_path,
