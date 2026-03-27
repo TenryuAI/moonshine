@@ -231,6 +231,57 @@ target_link_libraries(ort-thread-benchmark PRIVATE
     moonshine-utils
 )
 
+add_executable(vad-benchmark vad-benchmark.cpp voice-activity-detector.cpp resampler.cpp silero-vad.cpp)
+set_target_properties(vad-benchmark PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED YES
+    CXX_EXTENSIONS NO
+)
+target_include_directories(vad-benchmark PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}
+    ${CMAKE_CURRENT_LIST_DIR}/moonshine-utils
+    ${CMAKE_CURRENT_LIST_DIR}/ort-utils
+    ${CMAKE_CURRENT_LIST_DIR}/third-party/onnxruntime/include
+)
+if (IOS OR MOONSHINE_BUILD_SWIFT)
+    target_link_libraries(vad-benchmark PRIVATE
+        ort-utils
+        ${ONNXRUNTIME_LIB_PATH}
+        "-framework CoreFoundation"
+        "-framework Foundation"
+    )
+else()
+    target_link_libraries(vad-benchmark PRIVATE
+        ort-utils
+        ${ONNXRUNTIME_LIB_PATH}
+    )
+endif()
+
+# -----------------------------------------------------------------------------
+# rknn-hybrid-benchmark
+# -----------------------------------------------------------------------------
+if(UNIX AND NOT APPLE AND NOT ANDROID)
+    add_executable(rknn-hybrid-benchmark rknn-hybrid-benchmark.cpp resampler.cpp)
+    set_target_properties(rknn-hybrid-benchmark PROPERTIES
+        CXX_STANDARD 20
+        CXX_STANDARD_REQUIRED YES
+        CXX_EXTENSIONS NO
+    )
+    target_include_directories(rknn-hybrid-benchmark PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}
+        ${CMAKE_CURRENT_LIST_DIR}/moonshine-utils
+        ${CMAKE_CURRENT_LIST_DIR}/ort-utils
+        ${CMAKE_CURRENT_LIST_DIR}/third-party/onnxruntime/include
+        ${CMAKE_CURRENT_LIST_DIR}/third-party/onnxruntime/include/onnxruntime/core/session
+        ${CMAKE_CURRENT_LIST_DIR}/third-party/rknn_api_include
+    )
+    target_link_libraries(rknn-hybrid-benchmark PRIVATE
+        ort-utils
+        ${ONNXRUNTIME_LIB_PATH}
+        /usr/lib/aarch64-linux-gnu/librknnrt.so
+    )
+endif()
+
 # Windows DLLs don't export all symbols by default and so tests that rely on them
 # are skipped for shared builds.
 if (NOT WIN32 OR NOT MOONSHINE_BUILD_SHARED)

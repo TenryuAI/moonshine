@@ -927,7 +927,255 @@ Moonshine 已经有不少可调参数，但对 ARM 场景没有形成明确 prof
 2. 分 streaming / non-streaming 模型分别测
 3. 再决定是否要把某些线程策略做成 profile 建议
 
-### 12.12 第一轮 ARM 实机 streaming 模型线程实验结果
+### 12.12 RK3568 Linux 环境对 NNAPI 的现实约束
+
+在继续沿着 RK3568 这条线深入时，已经通过 SSH 对远端环境做了进一步确认：
+
+- 设备：RK3568 / RK356x
+- 系统：**Debian GNU/Linux 11**
+- 架构：`aarch64`
+
+这意味着一个非常关键的边界条件：
+
+**这台机器当前跑的是 Linux，不是 Android。**
+
+因此：
+
+- Moonshine 当前新增的 `ort_use_nnapi` 路径在这台机器上**不会生效**
+- 这条路径只在 **Android** 编译条件下接入
+- 在 RK3568 Linux 这台机器上，无法直接复用 Android 的 NNAPI provider 路线来做 VAD 加速实验
+
+进一步排查还看到：
+
+- 当前没有明显的 `rknpu` 设备节点
+- 但系统里已经存在：
+  - `rknn_server`
+  - `librknnrt.so`
+  - `librknn_api.so`
+  - Python 包 `rknnlite==1.5.2`
+- 也就是说，这台 RK3568 Linux 设备**并不是完全没有 NPU 运行时**，而是：
+  - 有 **RKNN Lite 运行时**
+  - 没有可直接在设备上做 ONNX -> RKNN 转换的 toolkit 能力
+
+所以针对你提出的“在 RK3568 上尝试 NNAPI 用于 VAD 检测”，当前最准确的结论是：
+
+**在这台 Linux 设备现状下，不能直接把 Android NNAPI 路线迁移到 VAD 上做对比。**
+
+如果未来要在这台机器上探索 NPU 路线，更现实的方向会是：
+
+- RKNN / Rockchip NPU 运行时
+- 或者其它 Linux 可用的 NPU 推理链
+
+而不是当前已经在 Android 路径接好的 NNAPI。
+
+更具体地说，RK3568 这条线现在已经能落地到这样的判断：
+
+- **VAD 上 NPU 并非完全不可能**
+- 但当前缺的是：
+  - 适配 RKNN 的 `.rknn` 模型文件
+  - 以及在主机侧完成 ONNX -> RKNN 的转换工具链
+
+也就是说，这条线现在不是“运行时不存在”，而是“**转换链缺失**”。
+
+### 12.13 RK3568 上的 VAD CPU 基线
+
+既然这台机器当前不能直接走 NNAPI for VAD，我补了一条最小 CPU 基线，用来回答：
+
+- 这台 RK3568 上，现有 VAD 纯 CPU 到底重不重
+
+为此新增了一个最小目标：
+
+- `core/vad-benchmark.cpp`
+
+并在 RK3568 上编译运行了两种模式：
+
+#### block 模式
+
+| mode | threshold | chunk | segments | elapsed | load |
+| --- | --- | --- | --- | --- | --- |
+| `block` | `0.50` | `0.100s` | 8 | 4.20s | 9.46% |
+
+#### stream 模式
+
+| mode | threshold | chunk | segments | elapsed | load |
+| --- | --- | --- | --- | --- | --- |
+| `stream` | `0.50` | `0.100s` | 8 | 4.11s | 9.27% |
+
+#### 从这条基线能看出的结论
+
+1. **VAD 本身在这台 RK3568 上并不是最重的瓶颈**
+   - 负载大约在音频时长的 `9%` 左右
+   - 远低于完整转写链的 CPU 占用
+
+2. **block / stream 两种调用方式在当前参数下差异不大**
+   - 说明我们前面做的 VAD 输入路径和缓冲优化并没有把行为搞坏
+
+3. **如果要在 RK3568 上继续优化，优先级仍应放在主转写链，而不是先花大量精力改 VAD 算子后端**
+
+也就是说，这台机器上的现状更像是：
+
+- VAD：值得持续做输入/缓冲层优化，但还不是最先爆炸的算力点
+- 主转写模型：仍然是更值得优先优化和调 profile 的地方
+
+#### RK3568 上如果真要把 Silero VAD 迁到 NPU，下一步应该怎么走
+
+这条路线现在的最现实方案不是改 `NNAPI`，而是：
+
+1. 在主机侧把 Silero VAD 的 ONNX 导出为独立模型
+2. 用 RKNN 工具链把 ONNX 转成 `.rknn`
+3. 把 `.rknn` 部署到 RK3568
+4. 用 `rknnlite` 或 `librknnrt` 写一个最小 VAD benchmark
+5. 再和当前这条 CPU 基线做对比
+
+所以如果后续继续深挖 RK3568 + VAD + NPU，这条线的最小可执行目标应该是：
+
+- **先补 RKNN 转换链**
+- 再做 `.rknn` VAD benchmark
+
+而不是继续沿着 Android NNAPI 方向尝试。
+
+当前仓库已经补了一个设备侧脚本骨架，供这条路线后续直接使用：
+
+- `scripts/rknn/silero_vad_rknn_benchmark.py`
+- `scripts/rknn/silero_vad_onnx_to_rknn.py`
+
+它的定位是：
+
+- 一旦拿到 `silero_vad.rknn`
+- 就能在 RK3568 上直接做最小 device-side benchmark
+- 重点回答：
+  - `.rknn` 模型能不能跑
+  - 推理负载大概是多少
+  - 和当前 CPU 基线相比是否值得继续
+
+#### RKNN 路线的当前真实状态
+
+根据现有排查，RK3568 上已经具备：
+
+- `rknnlite`
+- `rknn_server`
+- `librknnrt.so`
+
+但**还不具备**：
+
+- 在设备端把 ONNX 直接转成 `.rknn` 的 toolkit 能力
+
+这意味着 RKNN 路线现在应该明确拆成两段：
+
+1. **主机侧转换**
+   - 使用 `rknn-toolkit2`
+   - 目标：ONNX -> `.rknn`
+
+2. **设备侧运行**
+   - 使用 `rknnlite`
+   - 目标：加载 `.rknn` 并 benchmark
+
+#### 对 VAD / 降噪等模型的通用价值
+
+这条路线的意义不只在 VAD 本身。
+
+如果后续你想把：
+
+- 神经网络降噪
+- 关键词检测
+- 轻量 embedding
+- 其他小型前端音频模型
+
+迁到 RK3568 的 NPU 上，这条方法论都一样：
+
+1. 先拿到可转换的 ONNX
+2. 再用主机侧 RKNN Toolkit2 转 `.rknn`
+3. 再在设备上用 `rknnlite` 跑最小 benchmark
+4. 最后才决定值不值得接回主链
+
+#### 主机侧 RKNN 转换链需要什么环境
+
+如果要真正把 `silero_vad.onnx` 转成 `silero_vad.rknn`，主机侧至少要满足：
+
+1. 安装 **RKNN Toolkit2**
+   - 提供 `from rknn.api import RKNN`
+2. 使用 Rockchip 支持的主机环境
+   - 通常是 Ubuntu 系 Linux 主机
+3. 准备一个可独立访问的 `silero_vad.onnx`
+   - 当前仓库中的 Silero VAD 主要以内嵌字节形式存在于 `core/silero-vad-model-data.h`
+   - 因此实际转换前，通常还需要先拿到独立的 ONNX 文件
+
+这一步很关键，因为当前 RK3568 设备上只有：
+
+- `rknnlite`
+
+而没有：
+
+- `rknn-toolkit2`
+
+也就是说：
+
+- **转换必须在主机侧做**
+- **设备侧只负责加载 `.rknn` 并推理**
+
+#### 当前仓库里已经准备好的主机脚本骨架
+
+为了让这条路线可执行，当前仓库已经补了一个主机侧脚本：
+
+- `scripts/rknn/silero_vad_onnx_to_rknn.py`
+
+它当前的定位是：
+
+- 不假装已经知道所有 Silero VAD 转换细节
+- 但先把最标准的 RKNN Toolkit2 转换流程固定下来：
+  1. `RKNN()`
+  2. `config(...)`
+  3. `load_onnx(...)`
+  4. `build(...)`
+  5. `export_rknn(...)`
+
+#### 推荐的最小转换流程
+
+主机侧：
+
+```bash
+python scripts/rknn/silero_vad_onnx_to_rknn.py \
+  --onnx-path path/to/silero_vad.onnx \
+  --output-path silero_vad.rknn \
+  --target-platform rk3568
+```
+
+如果你后续想尝试量化：
+
+```bash
+python scripts/rknn/silero_vad_onnx_to_rknn.py \
+  --onnx-path path/to/silero_vad.onnx \
+  --output-path silero_vad.rknn \
+  --target-platform rk3568 \
+  --quantize \
+  --dataset path/to/calibration_dataset.txt
+```
+
+设备侧（RK3568）：
+
+```bash
+python scripts/rknn/silero_vad_rknn_benchmark.py \
+  --model-path /path/to/silero_vad.rknn \
+  --wav-path test-assets/two_cities_16k.wav
+```
+
+这就形成了一条完整的最小闭环：
+
+1. 主机侧 ONNX -> RKNN
+2. 设备侧 RKNN benchmark
+3. 与当前 CPU 基线对比
+
+#### 这条闭环最适合先验证什么
+
+这条流程第一阶段最适合回答的，不是“是否已经达到最终最佳性能”，而是：
+
+1. 这个模型能不能顺利转成 `.rknn`
+2. RK3568 上能不能稳定跑完
+3. 和当前 CPU 基线相比，是否有继续深挖的价值
+
+如果这三个问题里有任意一个答案是否定的，就不值得马上把 VAD NPU 化接回主链。
+
+### 12.14 第一轮 ARM 实机 streaming 模型线程实验结果
 
 在完成 non-streaming tiny 模型实验后，又在同一台 ARM 设备上继续对 **`tiny-streaming-en`** 跑了同样的 4 组线程参数对比。
 
@@ -1023,7 +1271,7 @@ Moonshine 已经有不少可调参数，但对 ARM 场景没有形成明确 prof
   - 更具体的 ORT 行为分析
   - 或转向 provider 级实验
 
-## 12.13 根据反馈修订后的方案细化
+## 12.15 根据反馈修订后的方案细化
 
 结合你给出的补充意见，当前方案还可以进一步明确成“**问题 -> 代码落点 -> 建议改法 -> ARM 收益**”四段式。下面是更可执行的一版。
 
@@ -1258,7 +1506,7 @@ ARM 收益：
 - `ARM改进分析.md`
 - 未来可扩展到 `原理及工作流程.md`
 
-## 12.14 建议新增一套“ARM 优化验收指标”
+## 12.16 建议新增一套“ARM 优化验收指标”
 
 如果方案要从分析走向实施，最好补一组统一指标，否则后续优化容易变成主观判断。
 
