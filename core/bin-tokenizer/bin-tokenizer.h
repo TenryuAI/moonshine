@@ -10,15 +10,17 @@
 #endif
 
 struct BinTokenizer {
+  static constexpr const char *kDefaultSpaceString = "\xE2\x96\x81";
   std::vector<std::vector<uint8_t>> tokens_to_bytes;
   const char *space_string;
 
-  BinTokenizer(const char *tokenizer_path, const char *space_string = "▁");
+  BinTokenizer(const char *tokenizer_path,
+               const char *space_string = kDefaultSpaceString);
   BinTokenizer(const uint8_t *tokenizer_data, size_t tokenizer_data_size,
-               const char *space_string = "▁");
+               const char *space_string = kDefaultSpaceString);
 #if defined(ANDROID)
   BinTokenizer(const char *tokenizer_path, AAssetManager *assetManager,
-               const char *space_string = "▁");
+               const char *space_string = kDefaultSpaceString);
 #endif
   template <typename T>
   std::vector<T> text_to_tokens(const std::string &text);

@@ -131,7 +131,8 @@ int GemmaEmbeddingModel::load_from_memory(const uint8_t *model_data,
 int GemmaEmbeddingModel::load_tokenizer(const char *tokenizer_path) {
   try {
     // Gemma uses ▁ (U+2581) as the space character in SentencePiece
-    tokenizer_ = new BinTokenizer(tokenizer_path, "▁");
+    tokenizer_ =
+        new BinTokenizer(tokenizer_path, BinTokenizer::kDefaultSpaceString);
     return 0;
   } catch (const std::exception &e) {
     LOGF("Failed to load tokenizer: %s\n", e.what());
@@ -148,7 +149,8 @@ int GemmaEmbeddingModel::load_tokenizer_from_memory(const uint8_t *data,
 
   try {
     // Gemma uses ▁ (U+2581) as the space character in SentencePiece
-    tokenizer_ = new BinTokenizer(data, data_size, "▁");
+    tokenizer_ = new BinTokenizer(data, data_size,
+                                  BinTokenizer::kDefaultSpaceString);
     LOGF("Tokenizer loaded with %zu tokens\n",
          tokenizer_->tokens_to_bytes.size());
     return 0;
