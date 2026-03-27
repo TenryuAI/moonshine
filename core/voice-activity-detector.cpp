@@ -76,16 +76,23 @@ void VoiceActivityDetector::process_audio(const float *audio_data,
   for (VoiceActivitySegment &segment : segments) {
     segment.just_updated = false;
   }
-  std::vector<float> input_audio_vector(audio_data,
-                                        audio_data + audio_data_size);
-  // The detection model expects 16000 Hz audio.
-  const std::vector<float> resampled_audio_vector =
-      resample_audio(input_audio_vector, sample_rate, vad_sample_rate);
-
   std::vector<float> processing_buffer = processing_remainder_audio_buffer;
-  processing_buffer.insert(processing_buffer.end(),
-                           resampled_audio_vector.begin(),
-                           resampled_audio_vector.end());
+  if (!needs_resampling(sample_rate, vad_sample_rate)) {
+    processing_buffer.reserve(processing_buffer.size() + audio_data_size);
+    processing_buffer.insert(processing_buffer.end(), audio_data,
+                             audio_data + audio_data_size);
+  } else {
+    std::vector<float> input_audio_vector(audio_data,
+                                          audio_data + audio_data_size);
+    // The detection model expects 16000 Hz audio.
+    const std::vector<float> resampled_audio_vector =
+        resample_audio(input_audio_vector, sample_rate, vad_sample_rate);
+    processing_buffer.reserve(processing_buffer.size() +
+                              resampled_audio_vector.size());
+    processing_buffer.insert(processing_buffer.end(),
+                             resampled_audio_vector.begin(),
+                             resampled_audio_vector.end());
+  }
   size_t processing_offset = 0;
   while (processing_buffer.size() - processing_offset >= (size_t)(hop_size)) {
     const float *audio_data = processing_buffer.data() + processing_offset;
