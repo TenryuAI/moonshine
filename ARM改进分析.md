@@ -469,26 +469,80 @@ Moonshine 已经有不少可调参数，但对 ARM 场景没有形成明确 prof
 
 这意味着现在已经可以做一个非常保守的 Android provider 试验，而不需要先改默认主链行为。
 
-当前 Android 侧还有一个现实阻断需要明确记录：
+当前 Android 侧此前存在过一个现实阻断，需要明确记录：
 
 - 本地代码已经具备 NNAPI 最小实验入口
 - Android instrumentation test 也已经补好
-- 但在当前这台开发机上：
-  - 没有可用的 `adb`
-  - 没有已连接 Android 设备
-  - `./gradlew :android:compileDebugAndroidTestJavaWithJavac` 目前还会卡在 Android Gradle Plugin 解析阶段
+- 初始状态下，本机确实缺少可直接运行的 Android 环境：
+  - `adb` 不在 `PATH`
+  - Android SDK 路径未配置
+  - 根级 Gradle 插件仓库配置缺失
+  - `android.useAndroidX` 也未开启
 
-也就是说，当前已经完成的是：
+在补齐这些工程条件之后，当前已经完成的是：
 
 - **代码接入完成**
 - **Android 测试入口完成**
 - **本地静态审查完成**
+- **instrumentation test 编译通过**
+- **AVD 已能注册到 `adb`**
+- **最小 NNAPI instrumentation test 已在模拟器上运行通过**
 
-但还没有完成：
+但还没有完成的仍然是：
 
-- **Android 设备上的实际 NNAPI provider 可用性验证**
+- **Android 真机上的实际 NNAPI provider 可用性验证**
+- **NNAPI 与 CPU 路径的收益对比验证**
 
-这不是代码逻辑阻断，而是本地 Android 运行环境阻断。
+这条阻断链目前已经基本打通：
+
+- 根级 `settings.gradle.kts` 已补齐插件仓库
+- `local.properties` 已能指向本机 SDK
+- `gradle.properties` 已补上 AndroidX 配置
+- Android instrumentation test 已经能在本机完成编译
+- 通过切换到 `Pixel_9` AVD，本机模拟器已成功注册到 `adb`
+- 新增的 NNAPI 最小 instrumentation test 已经可以在模拟器上成功跑通
+- Android CPU vs NNAPI 对比测试入口也已经补齐
+
+但这批模拟器结果的含义需要严格限定：
+
+- 它证明了 **Moonshine + Android 工程 + NNAPI option 路径至少可以运行到测试通过**
+- 模拟器日志里也已经出现了：
+  - `Attempting to enable NNAPI EP for MoonshineModel`
+  - `NNAPI EP enabled for MoonshineModel`
+  - `Found interface nnapi-sample_*`
+
+当前模拟器上的最小对比测试还额外给出了一组早期参考数据：
+
+- `cpuElapsedMs=6640`
+- `nnapiElapsedMs=5377`
+- `cpuLines=13`
+- `nnapiLines=13`
+
+这说明至少在 **当前 Pixel_9 AVD + sample NNAPI driver** 场景里：
+
+- NNAPI 路径不仅能跑通
+- 还没有明显破坏结果条数
+- 并且在这一次最小对比里，耗时低于 CPU 路径
+
+但这里仍然要非常谨慎：
+
+- 这只是模拟器上的 sample driver
+- 不是实际手机 NPU / GPU 的代表
+- 不能直接把这组结果外推成“NNAPI 在真机上一定更快”
+- 它还**不能**证明：
+  - 模拟器上真的使用了硬件级 NNAPI 加速
+  - 性能一定优于 CPU 路径
+  - 真机上的 NPU/GPU 行为与模拟器一致
+
+也就是说，这一步已经把 `NNAPI feasibility spike` 从：
+
+- “静态代码接入”
+
+推进到了：
+
+- “Android instrumentation 路径可运行”
+
+下一步如果要继续验证价值，就该从“能跑”进入“是否真的有收益、是否真的挂上了有效 provider”。
 
 #### 路线一：ORT 线程策略调优
 

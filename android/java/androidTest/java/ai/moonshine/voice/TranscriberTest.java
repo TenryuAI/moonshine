@@ -227,4 +227,66 @@ public class TranscriberTest {
         assertTrue(transcript != null);
         assertTrue(transcript.lines.size() > 0);
     }
+
+    @Test
+    public void testMoonshineTranscriberCompareCpuVsNnapi() {
+        Context testContext = InstrumentationRegistry.getInstrumentation().getContext();
+        Utils.WavData wavData = null;
+        try {
+            wavData = Utils.loadWavFromAssets(testContext, "two_cities.wav");
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+        assertTrue(wavData.data != null);
+        assertTrue(wavData.data.length > 0);
+
+        Utils.copyAssetToTempDir(testContext, tempDir, "tiny-en/encoder_model.ort");
+        Utils.copyAssetToTempDir(testContext, tempDir, "tiny-en/decoder_model_merged.ort");
+        Utils.copyAssetToTempDir(testContext, tempDir, "tiny-en/tokenizer.bin");
+        final String modelsPath = tempDir.toAbsolutePath().toString() + "/tiny-en/";
+
+        Transcriber cpuTranscriber = new Transcriber();
+        cpuTranscriber.loadFromFiles(modelsPath, JNI.MOONSHINE_MODEL_ARCH_TINY);
+        long cpuStart = System.nanoTime();
+        Transcript cpuTranscript =
+            cpuTranscriber.transcribeWithoutStreaming(wavData.data, wavData.sampleRate);
+        long cpuElapsedMs = (System.nanoTime() - cpuStart) / 1_000_000L;
+        assertTrue(cpuTranscript != null);
+        assertTrue(cpuTranscript.lines.size() > 0);
+
+        List<TranscriberOption> nnapiOptions = new ArrayList<>();
+        nnapiOptions.add(new TranscriberOption("ort_use_nnapi", "true"));
+        nnapiOptions.add(new TranscriberOption("ort_nnapi_use_fp16", "true"));
+
+        Transcriber nnapiTranscriber = new Transcriber(nnapiOptions);
+        nnapiTranscriber.loadFromFiles(modelsPath, JNI.MOONSHINE_MODEL_ARCH_TINY);
+        long nnapiStart = System.nanoTime();
+        Transcript nnapiTranscript =
+            nnapiTranscriber.transcribeWithoutStreaming(wavData.data, wavData.sampleRate);
+        long nnapiElapsedMs = (System.nanoTime() - nnapiStart) / 1_000_000L;
+        assertTrue(nnapiTranscript != null);
+        assertTrue(nnapiTranscript.lines.size() > 0);
+
+        StringBuilder cpuTextBuilder = new StringBuilder();
+        for (TranscriptLine line : cpuTranscript.lines) {
+            cpuTextBuilder.append(line.text.toLowerCase()).append(" ");
+        }
+        StringBuilder nnapiTextBuilder = new StringBuilder();
+        for (TranscriptLine line : nnapiTranscript.lines) {
+            nnapiTextBuilder.append(line.text.toLowerCase()).append(" ");
+        }
+
+        String cpuText = cpuTextBuilder.toString();
+        String nnapiText = nnapiTextBuilder.toString();
+        assertTrue(cpuText.contains("best of times"));
+        assertTrue(cpuText.contains("worst of times"));
+        assertTrue(nnapiText.contains("best of times"));
+        assertTrue(nnapiText.contains("worst of times"));
+
+        logger.log(Level.INFO,
+            "NNAPI comparison: cpuElapsedMs=" + cpuElapsedMs
+                + ", nnapiElapsedMs=" + nnapiElapsedMs
+                + ", cpuLines=" + cpuTranscript.lines.size()
+                + ", nnapiLines=" + nnapiTranscript.lines.size());
+    }
 }

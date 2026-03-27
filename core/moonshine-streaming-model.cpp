@@ -118,8 +118,12 @@ static void maybe_enable_nnapi(const OrtApi *ort_api,
   if (ort_nnapi_cpu_disabled) {
     nnapi_flags |= NNAPI_FLAG_CPU_DISABLED;
   }
+  LOGF("Attempting to enable NNAPI EP for MoonshineStreamingModel (flags=0x%X)",
+       nnapi_flags);
   LOG_ORT_ERROR(ort_api, OrtSessionOptionsAppendExecutionProvider_Nnapi(
                              session_options, nnapi_flags));
+  LOGF("NNAPI EP enabled for MoonshineStreamingModel (flags=0x%X)",
+       nnapi_flags);
 }
 #endif
 
