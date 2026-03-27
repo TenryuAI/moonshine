@@ -97,6 +97,88 @@ You'll need a USB microphone plugged in to get audio input, but the Python pip p
 
 I've recorded [a screencast on YouTube](https://www.youtube.com/watch?v=NNcqx1wFxl0) to help you get started, and you can also download [github.com/moonshine-ai/moonshine/releases/latest/download/raspberry-pi-examples.tar.gz](https://github.com/moonshine-ai/moonshine/releases/latest/download/raspberry-pi-examples.tar.gz) for some fun, Pi-specific examples. [The README](examples/raspberry-pi/my-dalek/README.md) has information about using a virtual environment for the Python install if you don't want to use `--break-system-packages`.
 
+### ARM And Embedded Linux
+
+Moonshine currently has the best out-of-the-box support for **64-bit ARM environments** like Raspberry Pi OS on a Pi 4/5, generic Linux `aarch64`, Android `arm64-v8a`, Apple Silicon, and Windows ARM64. For Linux-class embedded devices, the easiest paths today are:
+
+- Use the published Python package when available, especially on Raspberry Pi.
+- Build on the target device, or in a matching `linux/arm64` container, if you need custom binaries.
+- Use `scripts/build-pip-docker.sh` for a multi-architecture wheel build workflow.
+- Use `scripts/publish-binary.sh upload` when you want to package and upload a platform-specific binary tarball.
+
+For embedded ARM deployments, a few practical recommendations can improve responsiveness and reduce power use:
+
+- Prefer **16 KHz mono PCM input** so the library can skip unnecessary resampling work.
+- Start with a **streaming model** that fits your device budget before moving to larger variants.
+- Disable `identify_speakers`, `word_timestamps`, and `return_audio_data` unless you really need them.
+- In Python, prefer passing **contiguous `float32` numpy arrays** instead of Python lists when feeding audio.
+- If you're latency-sensitive, tune `transcription_interval`, `vad_threshold`, and `vad_window_duration` for your hardware rather than relying only on defaults.
+
+Suggested starting profiles for ARM and embedded devices:
+
+| Profile | Typical use case | Suggested settings |
+| ------- | ---------------- | ------------------ |
+| `armRealtimeLowLatency` | Live captions, responsive voice UI | Streaming model, `transcription_interval=0.2` to `0.3`, `identify_speakers=false`, `word_timestamps=false`, `return_audio_data=false` |
+| `armCommandRecognition` | Voice commands, robot or device control | Streaming model, `transcription_interval=0.3` to `0.5`, slightly higher `vad_threshold`, `identify_speakers=false`, attach `IntentRecognizer` only after `LineCompleted` |
+| `armMeetingTranscription` | Richer transcripts on stronger ARM devices | Larger streaming model if available, `transcription_interval=0.5`, optional `identify_speakers=true`, optional `word_timestamps=true`, expect higher CPU and memory cost |
+| `armLowPower` | Always-on or battery-sensitive deployments | Smallest acceptable model, `transcription_interval>=0.5`, `identify_speakers=false`, `word_timestamps=false`, `return_audio_data=false`, minimize debug logging |
+
+These are only starting points, but they map well to the most common edge-device tradeoffs:
+
+- Lower latency usually means more frequent updates and more CPU work.
+- Richer metadata such as speaker IDs and word timings increases both compute and memory pressure.
+- Low-power deployments benefit most from smaller models, fewer updates, and fewer optional features.
+
+If you need to reproduce an ARM build rather than consume a prebuilt package, the current project structure supports three practical workflows:
+
+1. **Build directly on the target device**. This is the most reliable option for Raspberry Pi and generic Linux `aarch64` systems because it automatically matches the target libc, CPU, and ONNX Runtime binaries expected by the release scripts.
+2. **Build in a matching `linux/arm64` container**. `scripts/build-pip-docker.sh` is the closest thing to a reproducible multi-architecture Python wheel workflow in this repo.
+3. **Package a binary tarball**. `scripts/publish-binary.sh upload` now uploads the main platform tarball for the current build target, including Linux ARM variants.
+
+For Linux ARM builds, the expected ONNX Runtime location is:
+
+```text
+core/third-party/onnxruntime/lib/linux/aarch64/
+```
+
+That same runtime path is currently used for both generic Linux `aarch64` and Raspberry Pi builds, while the release packaging distinguishes them as `linux-arm64` and `rpi-arm64`.
+
+Typical ARM build paths:
+
+```bash
+# Build the core library directly on an ARM Linux target
+cd core
+mkdir -p build
+cd build
+cmake ..
+cmake --build . --config Release
+```
+
+```bash
+# Build the Python wheel on the target device
+cd scripts
+./build-pip.sh
+```
+
+```bash
+# Build Python wheels in Docker for multiple architectures
+cd scripts
+./build-pip-docker.sh
+```
+
+```bash
+# Package and upload a binary tarball for the current platform
+cd scripts
+./publish-binary.sh upload
+```
+
+If you are debugging a build failure on ARM, the most useful things to verify first are:
+
+- The target is really 64-bit ARM (`aarch64`), not a 32-bit ARM userspace.
+- The expected ONNX Runtime libraries exist under `core/third-party/onnxruntime/lib/linux/aarch64/`.
+- You are building on the target device or in a container that matches the target architecture.
+- You are not accidentally mixing Raspberry Pi guidance with Windows or Android packaging steps.
+
 ## When should you choose Moonshine over Whisper?
 
 TL;DR - When you're working with live speech.
@@ -440,6 +522,8 @@ The different platforms and languages have a layer on top of the C interfaces to
 #### Porting
 
 If you have a device that isn't supported, you can try [building using cmake](#cmake) on your system. The only major dependency that the C++ core library has is [the Onnx Runtime](https://github.com/microsoft/onnxruntime). We include [pre-built binary library files](core/third-party/onnxruntime/lib/) for all our supported systems, but you'll need to find or build your own version if the libraries we offer don't cover your use case.
+
+For Linux ARM targets, the runtime libraries are expected under `core/third-party/onnxruntime/lib/linux/aarch64/`. Raspberry Pi builds and generic Linux `aarch64` builds currently share the same ONNX Runtime location, but are packaged under different platform labels (`rpi-arm64` versus `linux-arm64`) in the release scripts.
 
 If you want to call this library from a language we don't support, then you should take a look at [the C interface bindings](core/moonshine-c-api.h). Most languages have some way to call into C functions, so you can use these and the binding examples for other languages to guide your implementation.
 

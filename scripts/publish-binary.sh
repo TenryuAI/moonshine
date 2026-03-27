@@ -2,6 +2,11 @@
 
 VERSION=0.0.51
 REPO="moonshine-ai/moonshine"
+UPLOAD_RELEASE=0
+
+if [[ "$1" == "upload" ]]; then
+	UPLOAD_RELEASE=1
+fi
 
 SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT_DIR=$(dirname $SCRIPTS_DIR)
@@ -66,10 +71,13 @@ TAR_NAME=${FOLDER_NAME}.tar.gz
 tar -czvf ${TAR_NAME} ${FOLDER_NAME}
 cp ${TAR_NAME} ${REPO_ROOT_DIR}
 
-
-if [[ "$PLATFORM" == macos-* ]]; then
-
+if [[ ${UPLOAD_RELEASE} -eq 1 ]]; then
 	cd ${REPO_ROOT_DIR}
+
+	if ! command -v gh >/dev/null 2>&1; then
+		echo "gh CLI is required to upload release artifacts"
+		exit 1
+	fi
 
 	# Check if the GitHub release exists; create it if missing
 	if ! gh release view v$VERSION >/dev/null 2>&1; then
@@ -77,6 +85,11 @@ if [[ "$PLATFORM" == macos-* ]]; then
 	fi
 
 	gh release upload v$VERSION $TAR_NAME --clobber
+fi
+
+if [[ "$PLATFORM" == macos-* && ${UPLOAD_RELEASE} -eq 1 ]]; then
+
+	cd ${REPO_ROOT_DIR}
 
 	cd ${REPO_ROOT_DIR}/examples
 
