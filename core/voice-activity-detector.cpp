@@ -86,14 +86,15 @@ void VoiceActivityDetector::process_audio(const float *audio_data,
   processing_buffer.insert(processing_buffer.end(),
                            resampled_audio_vector.begin(),
                            resampled_audio_vector.end());
-  while (processing_buffer.size() >= (size_t)(hop_size)) {
-    const float *audio_data = processing_buffer.data();
+  size_t processing_offset = 0;
+  while (processing_buffer.size() - processing_offset >= (size_t)(hop_size)) {
+    const float *audio_data = processing_buffer.data() + processing_offset;
     size_t audio_data_size = hop_size;
     process_audio_chunk(audio_data, audio_data_size);
-    processing_buffer.erase(processing_buffer.begin(),
-                            processing_buffer.begin() + hop_size);
+    processing_offset += hop_size;
   }
-  processing_remainder_audio_buffer = processing_buffer;
+  processing_remainder_audio_buffer.assign(
+      processing_buffer.begin() + processing_offset, processing_buffer.end());
 }
 
 void VoiceActivityDetector::process_audio_chunk(const float *audio_data,
