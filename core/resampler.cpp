@@ -1,11 +1,22 @@
 #include "resampler.h"
 
+#include <cmath>
+
 #include "debug-utils.h"
+
+namespace {
+constexpr float kSampleRateEqualityEpsilon = 0.001f;
+}
+
+bool needs_resampling(float input_sample_rate, float output_sample_rate) {
+  return std::fabs(input_sample_rate - output_sample_rate) >
+         kSampleRateEqualityEpsilon;
+}
 
 const std::vector<float> resample_audio(const std::vector<float> &audio,
                                         float input_sample_rate,
                                         float output_sample_rate) {
-  if (input_sample_rate == output_sample_rate) {
+  if (!needs_resampling(input_sample_rate, output_sample_rate)) {
     return audio;
   }
   if (input_sample_rate > output_sample_rate) {

@@ -1060,10 +1060,22 @@ void TranscriberStream::save_audio_data_to_wav(const float *audio_data,
 void TranscriberStream::add_to_new_audio_buffer(const float *audio_data,
                                                 uint64_t audio_length,
                                                 int32_t sample_rate) {
+  if (audio_data == nullptr || audio_length == 0) {
+    return;
+  }
   this->save_audio_data_to_wav(audio_data, audio_length, sample_rate);
+  if (!needs_resampling(sample_rate, INTERNAL_SAMPLE_RATE)) {
+    this->new_audio_buffer.reserve(this->new_audio_buffer.size() +
+                                   static_cast<size_t>(audio_length));
+    this->new_audio_buffer.insert(this->new_audio_buffer.end(), audio_data,
+                                  audio_data + audio_length);
+    return;
+  }
   std::vector<float> audio_vector(audio_data, audio_data + audio_length);
   std::vector<float> resampled_audio =
       resample_audio(audio_vector, sample_rate, INTERNAL_SAMPLE_RATE);
+  this->new_audio_buffer.reserve(this->new_audio_buffer.size() +
+                                 resampled_audio.size());
   this->new_audio_buffer.insert(this->new_audio_buffer.end(),
                                 resampled_audio.begin(), resampled_audio.end());
 }
