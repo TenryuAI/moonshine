@@ -7,6 +7,8 @@ import os
 import sys
 from typing import Callable, List, Optional
 
+import numpy as np
+
 from moonshine_voice.moonshine_api import (
     _MoonshineLib,
     ModelArch,
@@ -18,6 +20,24 @@ from moonshine_voice.moonshine_api import (
 )
 from moonshine_voice.errors import MoonshineError, check_error
 from moonshine_voice.utils import get_model_path, get_assets_path, load_wav_file
+
+
+def _coerce_audio_buffer(audio_data):
+    """Convert audio input into a C-compatible float buffer.
+
+    Numpy float32 contiguous arrays can be passed through without the
+    per-element expansion cost of constructing a ctypes array from Python
+    iterables, which is especially helpful on slower ARM devices.
+    """
+
+    if isinstance(audio_data, np.ndarray):
+        np_audio = np.ascontiguousarray(audio_data, dtype=np.float32).reshape(-1)
+        audio_ptr = np_audio.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+        return np_audio, audio_ptr, int(np_audio.size)
+
+    audio_length = len(audio_data)
+    audio_array = (ctypes.c_float * audio_length)(*audio_data)
+    return audio_data, audio_array, audio_length
 
 
 # Event classes
@@ -164,9 +184,8 @@ class Transcriber:
         if self._handle is None:
             raise MoonshineError("Transcriber is not initialized")
 
-        # Convert audio data to ctypes array
-        audio_array = (ctypes.c_float * len(audio_data))(*audio_data)
-        audio_length = len(audio_data)
+        # Preserve a fast path for contiguous float32 numpy arrays.
+        _audio_owner, audio_array, audio_length = _coerce_audio_buffer(audio_data)
 
         # Prepare output transcript pointer
         out_transcript = ctypes.POINTER(TranscriptC)()
@@ -380,17 +399,17 @@ class Stream:
 
     def add_audio(self, audio_data: List[float], sample_rate: int = 16000):
         """Add audio data to the stream."""
-        audio_array = (ctypes.c_float * len(audio_data))(*audio_data)
+        _audio_owner, audio_array, audio_length = _coerce_audio_buffer(audio_data)
         error = self._lib.moonshine_transcribe_add_audio_to_stream(
             self._transcriber._handle,
             self._handle,
             audio_array,
-            len(audio_data),
+            audio_length,
             sample_rate,
             0,
         )
         check_error(error)
-        self._stream_time += len(audio_data) / sample_rate
+        self._stream_time += audio_length / sample_rate
         if self._stream_time - self._last_update_time >= self._update_interval:
             self.update_transcription(0)
             self._last_update_time = self._stream_time
