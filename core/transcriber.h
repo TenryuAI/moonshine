@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cinttypes>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <random>
 #include <string>
@@ -95,7 +96,7 @@ class TranscriberStream {
   std::string get_wav_filename();
 };
 
-typedef std::map<int32_t, TranscriberStream *> TranscriberStreamMap;
+typedef std::map<int32_t, std::shared_ptr<TranscriberStream>> TranscriberStreamMap;
 
 struct TranscriberOptions {
   enum ModelSource {
@@ -119,6 +120,7 @@ struct TranscriberOptions {
   int32_t vad_hop_size = 512;
   size_t vad_look_behind_sample_count = 8192;
   float vad_max_segment_duration = 15.0f;
+  size_t vad_min_silence_duration_ms = 1000;
   float max_tokens_per_second = 6.5f;
   float speaker_id_cluster_threshold = 0.6f;
   int32_t ort_intra_op_threads = 0;
@@ -162,7 +164,7 @@ class Transcriber {
   std::mutex streams_mutex;
   std::atomic<uint64_t> next_line_id = 0;
 
-  TranscriberStream *batch_stream = nullptr;
+  std::shared_ptr<TranscriberStream> batch_stream = nullptr;
   std::mutex batch_stream_mutex;
 
  public:
@@ -193,7 +195,7 @@ class Transcriber {
  private:
   void update_transcript_from_segments(
       const std::vector<VoiceActivitySegment> &segments,
-      TranscriberStream *stream, struct transcript_t **out_transcript);
+      std::shared_ptr<TranscriberStream> stream, struct transcript_t **out_transcript);
 
   void load_from_files(const char *model_path, uint32_t model_arch);
   void load_from_memory(const uint8_t *encoder_model_data,

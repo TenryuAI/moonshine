@@ -25,12 +25,14 @@ VoiceActivityDetector::VoiceActivityDetector(float threshold,
                                              int32_t window_size,
                                              int32_t hop_size,
                                              size_t look_behind_sample_count,
-                                             size_t max_segment_sample_count)
+                                             size_t max_segment_sample_count,
+                                             size_t min_silence_duration_ms)
     : threshold(threshold),
       window_size(window_size),
       hop_size(hop_size),
       look_behind_sample_count(look_behind_sample_count),
-      max_segment_sample_count(max_segment_sample_count) {
+      max_segment_sample_count(max_segment_sample_count),
+      min_silence_sample_count((min_silence_duration_ms * vad_sample_rate) / 1000) {
   // We only want a single, global instance of silero_vad
   if (VoiceActivityDetector::silero_vad == nullptr) {
     VoiceActivityDetector::silero_vad = new SileroVad();
@@ -42,6 +44,7 @@ VoiceActivityDetector::VoiceActivityDetector(float threshold,
   look_behind_audio_buffer.resize(look_behind_sample_count);
   processing_remainder_audio_buffer.resize(0);
   previous_is_voice = false;
+  silence_samples_count = 0;
   _is_active = false;
 }
 
@@ -57,6 +60,7 @@ void VoiceActivityDetector::start() {
   probability_window.resize(window_size, 0.0f);
   probability_window_index = 0;
   previous_is_voice = false;
+  silence_samples_count = 0;
 }
 
 void VoiceActivityDetector::stop() {
@@ -150,27 +154,45 @@ void VoiceActivityDetector::process_audio_chunk(const float *audio_data,
     smoothed_probability = smoothed_probability * fade_factor;
   }
   bool current_is_voice = smoothed_probability > threshold;
-  if (current_is_voice && !previous_is_voice) {
-    // Make sure we don't "look back" to before the start of the stream.
-    const size_t look_behind_size =
-        std::min(look_behind_sample_count, samples_processed_count);
-    current_segment_audio_buffer = std::vector<float>(
-        look_behind_audio_buffer.begin() +
-            (look_behind_audio_buffer.size() - look_behind_size),
-        look_behind_audio_buffer.end());
-    on_voice_start();
-  } else if (!current_is_voice && previous_is_voice) {
-    current_segment_audio_buffer.insert(current_segment_audio_buffer.end(),
-                                        audio_data,
-                                        audio_data + audio_data_size);
-    on_voice_end();
-    current_segment_audio_buffer.resize(0);
-    look_behind_audio_buffer.resize(look_behind_sample_count, 0.0f);
-  } else if (current_is_voice && previous_is_voice) {
-    current_segment_audio_buffer.insert(current_segment_audio_buffer.end(),
-                                        audio_data,
-                                        audio_data + audio_data_size);
-    on_voice_continuing();
+  if (current_is_voice) {
+    silence_samples_count = 0; // Reset silence counter when voice is detected
+    if (!previous_is_voice) {
+      // Make sure we don't "look back" to before the start of the stream.
+      const size_t look_behind_size =
+          std::min(look_behind_sample_count, samples_processed_count);
+      current_segment_audio_buffer = std::vector<float>(
+          look_behind_audio_buffer.begin() +
+              (look_behind_audio_buffer.size() - look_behind_size),
+          look_behind_audio_buffer.end());
+      on_voice_start();
+    } else {
+      current_segment_audio_buffer.insert(current_segment_audio_buffer.end(),
+                                          audio_data,
+                                          audio_data + audio_data_size);
+      on_voice_continuing();
+    }
+  } else {
+    // Current is not voice
+    if (previous_is_voice) {
+      current_segment_audio_buffer.insert(current_segment_audio_buffer.end(),
+                                          audio_data,
+                                          audio_data + audio_data_size);
+      silence_samples_count += audio_data_size;
+      
+      if (silence_samples_count >= min_silence_sample_count) {
+        // Prolonged silence, cut off the segment
+        on_voice_end();
+        current_segment_audio_buffer.resize(0);
+        look_behind_audio_buffer.resize(look_behind_sample_count, 0.0f);
+        silence_samples_count = 0;
+      } else {
+        // Silence pending, consider it still continuing the voice segment
+        on_voice_continuing();
+        // Override current_is_voice so that previous_is_voice remains true
+        // until we actually cut it off
+        current_is_voice = true;
+      }
+    }
   }
   previous_is_voice = current_is_voice;
 }

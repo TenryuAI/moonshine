@@ -40,12 +40,15 @@ class VoiceActivityDetector {
   std::vector<float> look_behind_audio_buffer;
   std::vector<float> processing_remainder_audio_buffer;
   bool previous_is_voice;
+  size_t silence_samples_count;
+  size_t min_silence_sample_count;
 
  public:
   VoiceActivityDetector(float threshold = 0.5f, int32_t window_size = 32,
                         int32_t hop_size = 512,
                         size_t look_behind_sample_count = 4096,
-                        size_t max_segment_sample_count = 15 * 16000);
+                        size_t max_segment_sample_count = 15 * 16000,
+                        size_t min_silence_duration_ms = 1000);
   ~VoiceActivityDetector();
 
   void start();

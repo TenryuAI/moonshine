@@ -989,9 +989,11 @@ int MoonshineStreamingModel::run_decoder_with_cross_kv(
               output_names_vec.data(), decoder_output_count, outputs.data());
 
   // Release inputs
-  for (int i = 0; i < 5; i++) {
-    ort_api->ReleaseValue(inputs[i]);
-  }
+  ort_api->ReleaseValue(token_tensor);
+  ort_api->ReleaseValue(k_self_tensor);
+  ort_api->ReleaseValue(v_self_tensor);
+  ort_api->ReleaseValue(k_cross_tensor);
+  ort_api->ReleaseValue(v_cross_tensor);
 
   if (status != nullptr) {
     LOG_ORT_ERROR(ort_api, status);

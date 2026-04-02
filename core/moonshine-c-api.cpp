@@ -42,6 +42,7 @@ SOFTWARE.
 #include <cstring>
 #include <cstring>  // For strerror
 #include <map>
+#include <memory>
 #include <mutex>
 #include <numeric>
 #include <vector>
@@ -60,16 +61,19 @@ SOFTWARE.
 // Defined as a macro to ensure we get meaningful line numbers in the error
 // message.
 #define CHECK_TRANSCRIBER_HANDLE(handle)                                  \
+  std::shared_ptr<Transcriber> transcriber;                               \
   do {                                                                    \
+    std::lock_guard<std::mutex> lock(transcriber_map_mutex);              \
     if (handle < 0 || !transcriber_map.contains(handle)) {                \
       LOGF("Moonshine transcriber handle is invalid: handle %d", handle); \
       return MOONSHINE_ERROR_INVALID_HANDLE;                              \
     }                                                                     \
+    transcriber = transcriber_map[handle];                                \
   } while (0)
 
 namespace {
 
-bool log_api_calls = false;
+  std::atomic<bool> log_api_calls = false;
 
 void parse_transcriber_options(const transcriber_option_t *in_options,
                                uint64_t in_options_count,
@@ -86,7 +90,7 @@ void parse_transcriber_options(const transcriber_option_t *in_options,
     } else if (option_name == "save_input_wav_path") {
       out_options.save_input_wav_path = std::string(in_option.value);
     } else if (option_name == "log_api_calls") {
-      log_api_calls = bool_from_string(in_option.value);
+      log_api_calls.store(bool_from_string(in_option.value));
     } else if (option_name == "log_ort_run") {
       out_options.log_ort_run = bool_from_string(in_option.value);
     } else if (option_name == "vad_window_duration") {
@@ -97,6 +101,8 @@ void parse_transcriber_options(const transcriber_option_t *in_options,
       out_options.vad_look_behind_sample_count = size_t_from_string(in_option.value);
     } else if (option_name == "vad_max_segment_duration") {
       out_options.vad_max_segment_duration = float_from_string(in_option.value);
+    } else if (option_name == "vad_min_silence_duration_ms") {
+      out_options.vad_min_silence_duration_ms = size_t_from_string(in_option.value);
     } else if (option_name == "max_tokens_per_second") {
       out_options.max_tokens_per_second = float_from_string(in_option.value);
     } else if (option_name == "ort_intra_op_threads") {
@@ -127,10 +133,10 @@ void parse_transcriber_options(const transcriber_option_t *in_options,
 }
 
 std::mutex transcriber_map_mutex;
-std::map<int32_t, Transcriber *> transcriber_map;
+std::map<int32_t, std::shared_ptr<Transcriber>> transcriber_map;
 int32_t next_transcriber_handle = 0;
 
-int32_t allocate_transcriber_handle(Transcriber *transcriber) {
+int32_t allocate_transcriber_handle(std::shared_ptr<Transcriber> transcriber) {
   std::lock_guard<std::mutex> lock(transcriber_map_mutex);
   int32_t transcriber_handle = next_transcriber_handle++;
   transcriber_map[transcriber_handle] = transcriber;
@@ -139,15 +145,13 @@ int32_t allocate_transcriber_handle(Transcriber *transcriber) {
 
 void free_transcriber_handle(int32_t handle) {
   std::lock_guard<std::mutex> lock(transcriber_map_mutex);
-  delete transcriber_map[handle];
-  transcriber_map[handle] = nullptr;
   transcriber_map.erase(handle);
 }
 
 }  // namespace
 
 extern "C" int32_t moonshine_get_version(void) {
-  if (log_api_calls) {
+  if (log_api_calls.load()) {
     LOG("moonshine_get_version");
   }
   return MOONSHINE_HEADER_VERSION;
@@ -171,7 +175,7 @@ extern "C" const char *moonshine_error_to_string(int32_t error) {
 extern "C" int32_t moonshine_load_transcriber_from_files(
     const char *path, uint32_t model_arch, const transcriber_option_t *options,
     uint64_t options_count, int32_t moonshine_version) {
-  if (log_api_calls) {
+  if (log_api_calls.load()) {
     LOGF(
         "moonshine_load_transcriber_from_files(path=%s, model_arch=%d, "
         "options=%p, options_count=%" PRIu64 ", moonshine_version=%d)",
@@ -181,19 +185,25 @@ extern "C" int32_t moonshine_load_transcriber_from_files(
       LOGF("  option[%" PRIu64 "] = %s=%s", i, option.name, option.value);
     }
   }
-  Transcriber *transcriber = nullptr;
+
+  if (moonshine_version != MOONSHINE_HEADER_VERSION) {
+    LOGF("Version mismatch: header version %d, but library version %d. Please recompile.", moonshine_version, MOONSHINE_HEADER_VERSION);
+    return MOONSHINE_ERROR_INVALID_ARGUMENT;
+  }
+
+  std::shared_ptr<Transcriber> new_transcriber;
   try {
     TranscriberOptions transcriber_options;
     transcriber_options.model_source = TranscriberOptions::ModelSource::FILES;
     transcriber_options.model_path = path;
     transcriber_options.model_arch = model_arch;
     parse_transcriber_options(options, options_count, transcriber_options);
-    transcriber = new Transcriber(transcriber_options);
+    new_transcriber = std::make_shared<Transcriber>(transcriber_options);
   } catch (const std::exception &e) {
     LOGF("Failed to load transcriber: %s\n", e.what());
     return MOONSHINE_ERROR_UNKNOWN;
   }
-  int32_t transcriber_handle = allocate_transcriber_handle(transcriber);
+  int32_t transcriber_handle = allocate_transcriber_handle(new_transcriber);
   return transcriber_handle;
 }
 
@@ -203,7 +213,7 @@ int32_t moonshine_load_transcriber_from_memory(
     const uint8_t *tokenizer_data, size_t tokenizer_data_size,
     uint32_t model_arch, const transcriber_option_t *options,
     uint64_t options_count, int32_t moonshine_version) {
-  if (log_api_calls) {
+  if (log_api_calls.load()) {
     LOGF(
         "moonshine_load_transcriber_from_memory(encoder_model_data=%p, "
         "encoder_model_data_size=%zu, decoder_model_data=%p, "
@@ -220,7 +230,12 @@ int32_t moonshine_load_transcriber_from_memory(
     }
   }
 
-  Transcriber *transcriber = nullptr;
+  if (moonshine_version != MOONSHINE_HEADER_VERSION) {
+    LOGF("Version mismatch: header version %d, but library version %d. Please recompile.", moonshine_version, MOONSHINE_HEADER_VERSION);
+    return MOONSHINE_ERROR_INVALID_ARGUMENT;
+  }
+
+  std::shared_ptr<Transcriber> new_transcriber;
   try {
     TranscriberOptions transcriber_options;
     transcriber_options.model_source = TranscriberOptions::ModelSource::MEMORY;
@@ -232,17 +247,17 @@ int32_t moonshine_load_transcriber_from_memory(
     transcriber_options.tokenizer_data_size = tokenizer_data_size;
     transcriber_options.model_arch = model_arch;
     parse_transcriber_options(options, options_count, transcriber_options);
-    transcriber = new Transcriber(transcriber_options);
+    new_transcriber = std::make_shared<Transcriber>(transcriber_options);
   } catch (const std::exception &e) {
     LOGF("Failed to load transcriber: %s\n", e.what());
     return MOONSHINE_ERROR_UNKNOWN;
   }
-  int32_t transcriber_handle = allocate_transcriber_handle(transcriber);
+  int32_t transcriber_handle = allocate_transcriber_handle(new_transcriber);
   return transcriber_handle;
 }
 
 void moonshine_free_transcriber(int32_t transcriber_handle) {
-  if (log_api_calls) {
+  if (log_api_calls.load()) {
     LOGF("moonshine_free_transcriber(transcriber_handle=%d)",
          transcriber_handle);
   }
@@ -252,7 +267,7 @@ void moonshine_free_transcriber(int32_t transcriber_handle) {
 int32_t moonshine_transcribe_without_streaming(
     int32_t transcriber_handle, float *audio_data, uint64_t audio_length,
     int32_t sample_rate, uint32_t flags, struct transcript_t **out_transcript) {
-  if (log_api_calls) {
+  if (log_api_calls.load()) {
     LOGF(
         "moonshine_transcribe_without_streaming(transcriber_handle=%d, "
         "audio_data=%p, audio_length=%" PRIu64
@@ -263,7 +278,7 @@ int32_t moonshine_transcribe_without_streaming(
   }
   CHECK_TRANSCRIBER_HANDLE(transcriber_handle);
   try {
-    transcriber_map[transcriber_handle]->transcribe_without_streaming(
+    transcriber->transcribe_without_streaming(
         audio_data, audio_length, sample_rate, flags, out_transcript);
   } catch (const std::exception &e) {
     LOGF("Failed to transcribe without streaming: %s\n", e.what());
@@ -273,13 +288,13 @@ int32_t moonshine_transcribe_without_streaming(
 }
 
 int32_t moonshine_create_stream(int32_t transcriber_handle, uint32_t flags) {
-  if (log_api_calls) {
+  if (log_api_calls.load()) {
     LOGF("moonshine_create_stream(transcriber_handle=%d, flags=%d)",
          transcriber_handle, flags);
   }
   CHECK_TRANSCRIBER_HANDLE(transcriber_handle);
   try {
-    return transcriber_map[transcriber_handle]->create_stream();
+    return transcriber->create_stream();
   } catch (const std::exception &e) {
     LOGF("Failed to create stream: %s\n", e.what());
     return MOONSHINE_ERROR_UNKNOWN;
@@ -287,13 +302,13 @@ int32_t moonshine_create_stream(int32_t transcriber_handle, uint32_t flags) {
 }
 
 int moonshine_free_stream(int32_t transcriber_handle, int32_t stream_handle) {
-  if (log_api_calls) {
+  if (log_api_calls.load()) {
     LOGF("moonshine_free_stream(transcriber_handle=%d, stream_handle=%d)",
          transcriber_handle, stream_handle);
   }
   CHECK_TRANSCRIBER_HANDLE(transcriber_handle);
   try {
-    transcriber_map[transcriber_handle]->free_stream(stream_handle);
+    transcriber->free_stream(stream_handle);
   } catch (const std::exception &e) {
     LOGF("Failed to free stream: %s\n", e.what());
     return MOONSHINE_ERROR_UNKNOWN;
@@ -303,13 +318,13 @@ int moonshine_free_stream(int32_t transcriber_handle, int32_t stream_handle) {
 
 int32_t moonshine_start_stream(int32_t transcriber_handle,
                                int32_t stream_handle) {
-  if (log_api_calls) {
+  if (log_api_calls.load()) {
     LOGF("moonshine_start_stream(transcriber_handle=%d, stream_handle=%d)",
          transcriber_handle, stream_handle);
   }
   CHECK_TRANSCRIBER_HANDLE(transcriber_handle);
   try {
-    transcriber_map[transcriber_handle]->start_stream(stream_handle);
+    transcriber->start_stream(stream_handle);
   } catch (const std::exception &e) {
     LOGF("Failed to start stream: %s\n", e.what());
     return MOONSHINE_ERROR_UNKNOWN;
@@ -319,13 +334,13 @@ int32_t moonshine_start_stream(int32_t transcriber_handle,
 
 int32_t moonshine_stop_stream(int32_t transcriber_handle,
                               int32_t stream_handle) {
-  if (log_api_calls) {
+  if (log_api_calls.load()) {
     LOGF("moonshine_stop_stream(transcriber_handle=%d, stream_handle=%d)",
          transcriber_handle, stream_handle);
   }
   CHECK_TRANSCRIBER_HANDLE(transcriber_handle);
   try {
-    transcriber_map[transcriber_handle]->stop_stream(stream_handle);
+    transcriber->stop_stream(stream_handle);
   } catch (const std::exception &e) {
     LOGF("Failed to stop stream: %s\n", e.what());
     return MOONSHINE_ERROR_UNKNOWN;
@@ -335,10 +350,10 @@ int32_t moonshine_stop_stream(int32_t transcriber_handle,
 
 const char *moonshine_transcript_to_string(
     const struct transcript_t *transcript) {
-  if (log_api_calls) {
+  if (log_api_calls.load()) {
     LOGF("moonshine_transcript_to_string(transcript=%p)", (void *)(transcript));
   }
-  static std::string description;
+  thread_local std::string description;
   description = Transcriber::transcript_to_string(transcript);
   return description.c_str();
 }
@@ -349,7 +364,7 @@ int32_t moonshine_transcribe_add_audio_to_stream(int32_t transcriber_handle,
                                                  uint64_t audio_length,
                                                  int32_t sample_rate,
                                                  uint32_t flags) {
-  if (log_api_calls) {
+  if (log_api_calls.load()) {
     LOGF(
         "moonshine_transcribe_add_audio_to_stream(transcriber_handle=%d, "
         "stream_handle=%d, new_audio_data=%p, audio_length=%" PRIu64
@@ -360,7 +375,7 @@ int32_t moonshine_transcribe_add_audio_to_stream(int32_t transcriber_handle,
   }
   CHECK_TRANSCRIBER_HANDLE(transcriber_handle);
   try {
-    transcriber_map[transcriber_handle]->add_audio_to_stream(
+    transcriber->add_audio_to_stream(
         stream_handle, new_audio_data, audio_length, sample_rate);
   } catch (const std::exception &e) {
     LOGF("Failed to add audio to stream: %s\n", e.what());
@@ -372,7 +387,7 @@ int32_t moonshine_transcribe_add_audio_to_stream(int32_t transcriber_handle,
 int32_t moonshine_transcribe_stream(int32_t transcriber_handle,
                                     int32_t stream_handle, uint32_t flags,
                                     struct transcript_t **out_transcript) {
-  if (log_api_calls) {
+  if (log_api_calls.load()) {
     LOGF(
         "moonshine_transcribe_stream(transcriber_handle=%d, stream_handle=%d, "
         "flags=%d, out_transcript=%p)",
@@ -380,7 +395,7 @@ int32_t moonshine_transcribe_stream(int32_t transcriber_handle,
   }
   CHECK_TRANSCRIBER_HANDLE(transcriber_handle);
   try {
-    transcriber_map[transcriber_handle]->transcribe_stream(stream_handle, flags,
+    transcriber->transcribe_stream(stream_handle, flags,
                                                            out_transcript);
   } catch (const std::exception &e) {
     LOGF("Failed to transcribe stream: %s\n", e.what());
@@ -401,11 +416,11 @@ struct IntentCallbackInfo {
 };
 
 std::mutex intent_recognizer_map_mutex;
-std::map<int32_t, IntentRecognizer *> intent_recognizer_map;
+std::map<int32_t, std::shared_ptr<IntentRecognizer>> intent_recognizer_map;
 std::map<int32_t, std::vector<IntentCallbackInfo>> intent_callback_map;
 int32_t next_intent_recognizer_handle = 0;
 
-int32_t allocate_intent_recognizer_handle(IntentRecognizer *recognizer) {
+int32_t allocate_intent_recognizer_handle(std::shared_ptr<IntentRecognizer> recognizer) {
   std::lock_guard<std::mutex> lock(intent_recognizer_map_mutex);
   int32_t handle = next_intent_recognizer_handle++;
   intent_recognizer_map[handle] = recognizer;
@@ -415,18 +430,19 @@ int32_t allocate_intent_recognizer_handle(IntentRecognizer *recognizer) {
 
 void free_intent_recognizer_handle(int32_t handle) {
   // Note: Caller must hold intent_recognizer_map_mutex
-  delete intent_recognizer_map[handle];
-  intent_recognizer_map[handle] = nullptr;
   intent_recognizer_map.erase(handle);
   intent_callback_map.erase(handle);
 }
 
 #define CHECK_INTENT_RECOGNIZER_HANDLE(handle)                                  \
+  std::shared_ptr<IntentRecognizer> recognizer;                                 \
   do {                                                                          \
+    std::lock_guard<std::mutex> lock(intent_recognizer_map_mutex);              \
     if (handle < 0 || !intent_recognizer_map.contains(handle)) {                \
       LOGF("Moonshine intent recognizer handle is invalid: handle %d", handle); \
       return MOONSHINE_ERROR_INVALID_HANDLE;                                    \
     }                                                                           \
+    recognizer = intent_recognizer_map[handle];                                 \
   } while (0)
 
 }  // namespace
@@ -435,7 +451,7 @@ int32_t moonshine_create_intent_recognizer(const char *model_path,
                                            uint32_t model_arch,
                                            const char *model_variant,
                                            float threshold) {
-  if (log_api_calls) {
+  if (log_api_calls.load()) {
     LOGF("moonshine_create_intent_recognizer(model_path=%s, model_arch=%d, "
          "model_variant=%s, threshold=%f)",
          model_path, model_arch, model_variant ? model_variant : "q4",
@@ -447,7 +463,7 @@ int32_t moonshine_create_intent_recognizer(const char *model_path,
     return MOONSHINE_ERROR_INVALID_ARGUMENT;
   }
 
-  IntentRecognizer *recognizer = nullptr;
+  std::shared_ptr<IntentRecognizer> new_recognizer;
   try {
     IntentRecognizerOptions options;
     options.model_path = model_path;
@@ -455,17 +471,16 @@ int32_t moonshine_create_intent_recognizer(const char *model_path,
     options.model_variant = model_variant ? model_variant : "q4";
     options.threshold = threshold;
 
-    recognizer = new IntentRecognizer(options);
+    new_recognizer = std::make_shared<IntentRecognizer>(options);
   } catch (const std::exception &e) {
-    delete recognizer;
     LOGF("Failed to create intent recognizer: %s", e.what());
     return MOONSHINE_ERROR_UNKNOWN;
   }
-  return allocate_intent_recognizer_handle(recognizer);
+  return allocate_intent_recognizer_handle(new_recognizer);
 }
 
 void moonshine_free_intent_recognizer(int32_t intent_recognizer_handle) {
-  if (log_api_calls) {
+  if (log_api_calls.load()) {
     LOGF("moonshine_free_intent_recognizer(handle=%d)", intent_recognizer_handle);
   }
   std::lock_guard<std::mutex> lock(intent_recognizer_map_mutex);
@@ -478,7 +493,7 @@ int32_t moonshine_register_intent(int32_t intent_recognizer_handle,
                                   const char *trigger_phrase,
                                   moonshine_intent_callback callback,
                                   void *user_data) {
-  if (log_api_calls) {
+  if (log_api_calls.load()) {
     LOGF("moonshine_register_intent(handle=%d, trigger_phrase=%s)",
          intent_recognizer_handle, trigger_phrase);
   }
@@ -499,7 +514,7 @@ int32_t moonshine_register_intent(int32_t intent_recognizer_handle,
     // callback. We capture a std::string copy of trigger_phrase since the
     // original pointer may become invalid after this function returns.
     std::string trigger_copy = trigger_phrase;
-    intent_recognizer_map[intent_recognizer_handle]->register_intent(
+    recognizer->register_intent(
         trigger_phrase,
         [callback, user_data, trigger_copy](const std::string &utterance,
                                             float similarity) {
@@ -517,13 +532,13 @@ int32_t moonshine_register_intent(int32_t intent_recognizer_handle,
 
 int32_t moonshine_unregister_intent(int32_t intent_recognizer_handle,
                                     const char *trigger_phrase) {
-  if (log_api_calls) {
+  if (log_api_calls.load()) {
     LOGF("moonshine_unregister_intent(handle=%d, trigger_phrase=%s)",
          intent_recognizer_handle, trigger_phrase);
   }
   CHECK_INTENT_RECOGNIZER_HANDLE(intent_recognizer_handle);
   try {
-    bool result = intent_recognizer_map[intent_recognizer_handle]
+    bool result = recognizer
                       ->unregister_intent(trigger_phrase);
     if (!result) {
       return MOONSHINE_ERROR_INVALID_ARGUMENT;
@@ -548,13 +563,13 @@ int32_t moonshine_unregister_intent(int32_t intent_recognizer_handle,
 
 int32_t moonshine_process_utterance(int32_t intent_recognizer_handle,
                                     const char *utterance) {
-  if (log_api_calls) {
+  if (log_api_calls.load()) {
     LOGF("moonshine_process_utterance(handle=%d, utterance=%s)",
          intent_recognizer_handle, utterance);
   }
   CHECK_INTENT_RECOGNIZER_HANDLE(intent_recognizer_handle);
   try {
-    bool result = intent_recognizer_map[intent_recognizer_handle]
+    bool result = recognizer
                       ->process_utterance(utterance);
     return result ? 1 : 0;
   } catch (const std::exception &e) {
@@ -565,13 +580,13 @@ int32_t moonshine_process_utterance(int32_t intent_recognizer_handle,
 
 int32_t moonshine_set_intent_threshold(int32_t intent_recognizer_handle,
                                        float threshold) {
-  if (log_api_calls) {
+  if (log_api_calls.load()) {
     LOGF("moonshine_set_intent_threshold(handle=%d, threshold=%f)",
          intent_recognizer_handle, threshold);
   }
   CHECK_INTENT_RECOGNIZER_HANDLE(intent_recognizer_handle);
   try {
-    intent_recognizer_map[intent_recognizer_handle]->set_threshold(threshold);
+    recognizer->set_threshold(threshold);
   } catch (const std::exception &e) {
     LOGF("Failed to set intent threshold: %s", e.what());
     return MOONSHINE_ERROR_UNKNOWN;
@@ -580,35 +595,43 @@ int32_t moonshine_set_intent_threshold(int32_t intent_recognizer_handle,
 }
 
 float moonshine_get_intent_threshold(int32_t intent_recognizer_handle) {
-  if (log_api_calls) {
+  if (log_api_calls.load()) {
     LOGF("moonshine_get_intent_threshold(handle=%d)", intent_recognizer_handle);
   }
-  std::lock_guard<std::mutex> lock(intent_recognizer_map_mutex);
-  if (!intent_recognizer_map.contains(intent_recognizer_handle)) {
-    return -1.0f;
+  std::shared_ptr<IntentRecognizer> recognizer;
+  {
+    std::lock_guard<std::mutex> lock(intent_recognizer_map_mutex);
+    if (!intent_recognizer_map.contains(intent_recognizer_handle)) {
+      return -1.0f;
+    }
+    recognizer = intent_recognizer_map[intent_recognizer_handle];
   }
-  return intent_recognizer_map[intent_recognizer_handle]->get_threshold();
+  return recognizer->get_threshold();
 }
 
 int32_t moonshine_get_intent_count(int32_t intent_recognizer_handle) {
-  if (log_api_calls) {
+  if (log_api_calls.load()) {
     LOGF("moonshine_get_intent_count(handle=%d)", intent_recognizer_handle);
   }
-  std::lock_guard<std::mutex> lock(intent_recognizer_map_mutex);
-  if (!intent_recognizer_map.contains(intent_recognizer_handle)) {
-    return MOONSHINE_ERROR_INVALID_HANDLE;
+  std::shared_ptr<IntentRecognizer> recognizer;
+  {
+    std::lock_guard<std::mutex> lock(intent_recognizer_map_mutex);
+    if (!intent_recognizer_map.contains(intent_recognizer_handle)) {
+      return MOONSHINE_ERROR_INVALID_HANDLE;
+    }
+    recognizer = intent_recognizer_map[intent_recognizer_handle];
   }
   return static_cast<int32_t>(
-      intent_recognizer_map[intent_recognizer_handle]->get_intent_count());
+      recognizer->get_intent_count());
 }
 
 int32_t moonshine_clear_intents(int32_t intent_recognizer_handle) {
-  if (log_api_calls) {
+  if (log_api_calls.load()) {
     LOGF("moonshine_clear_intents(handle=%d)", intent_recognizer_handle);
   }
   CHECK_INTENT_RECOGNIZER_HANDLE(intent_recognizer_handle);
   try {
-    intent_recognizer_map[intent_recognizer_handle]->clear_intents();
+    recognizer->clear_intents();
     {
       std::lock_guard<std::mutex> lock(intent_recognizer_map_mutex);
       intent_callback_map[intent_recognizer_handle].clear();

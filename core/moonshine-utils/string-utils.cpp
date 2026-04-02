@@ -139,7 +139,7 @@ size_t size_t_from_string(const char *input) {
   }
   size_t result = 0;
   try {
-    result = std::stoul(input, nullptr, 10);
+    result = static_cast<size_t>(std::stoull(input, nullptr, 10));
   } catch (const std::exception &e) {
     throw std::runtime_error("Invalid size_t string: '" + std::string(input) +
                              "': " + e.what());

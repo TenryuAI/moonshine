@@ -159,7 +159,11 @@ void Transcriber::load_from_files(const char *model_path, uint32_t model_arch) {
         if (dec_err != 0) {
           LOGF("Warning: Failed to load decoder_kv_with_attention from %s\n",
                decoder_attn_path.c_str());
+          this->options.word_timestamps = false;
         }
+      } else {
+        LOG("Warning: decoder_kv_with_attention not found, word timestamps disabled\n");
+        this->options.word_timestamps = false;
       }
     }
   } else {
@@ -227,6 +231,7 @@ void Transcriber::load_from_files(const char *model_path, uint32_t model_arch) {
         if (dec_err != 0) {
           LOGF("Warning: Failed to load decoder_with_attention from %s\n",
                decoder_attn_path.c_str());
+          this->options.word_timestamps = false;
         }
       } else if (std::filesystem::exists(alignment_path)) {
         // Two-pass fallback: separate alignment model
@@ -235,10 +240,12 @@ void Transcriber::load_from_files(const char *model_path, uint32_t model_arch) {
         if (align_err != 0) {
           LOGF("Warning: Failed to load alignment model from %s\n",
                alignment_path.c_str());
+          this->options.word_timestamps = false;
         }
       } else {
         LOG("Warning: No word timestamp model found, word timestamps "
             "disabled\n");
+        this->options.word_timestamps = false;
       }
     }
   }
@@ -282,28 +289,30 @@ Transcriber::~Transcriber() {
   delete this->streaming_model;
   delete this->speaker_embedding_model;
   delete this->online_clusterer;
-  for (auto &stream : this->streams) {
-    delete stream.second;
-  }
+  this->streams.clear();
   if (this->batch_stream != nullptr) {
-    delete this->batch_stream;
+    this->batch_stream.reset();
   }
 }
 
 void Transcriber::transcribe_without_streaming(
     const float *audio_data, uint64_t audio_length, int32_t sample_rate,
     uint32_t /*flags*/, struct transcript_t **out_transcript) {
+  if (audio_length > static_cast<uint64_t>(INT32_MAX)) {
+    throw std::invalid_argument("Audio length exceeds INT32_MAX");
+  }
   std::lock_guard<std::mutex> lock(this->batch_stream_mutex);
   if (this->batch_stream == nullptr) {
     const int32_t vad_window_size = vad_window_size_from_duration(
         this->options.vad_window_duration, this->options.vad_hop_size);
     const size_t vad_max_segment_sample_count =
         vad_sample_count_from_duration(this->options.vad_max_segment_duration);
-    this->batch_stream = new TranscriberStream(
+    this->batch_stream = std::make_shared<TranscriberStream>(
         new VoiceActivityDetector(this->options.vad_threshold, vad_window_size,
                                   this->options.vad_hop_size,
                                   this->options.vad_look_behind_sample_count,
-                                  vad_max_segment_sample_count),
+                                  vad_max_segment_sample_count,
+                                  this->options.vad_min_silence_duration_ms),
         -1, this->options.save_input_wav_path);
   }
   if (!this->batch_stream->save_input_wav_path.empty()) {
@@ -311,7 +320,7 @@ void Transcriber::transcribe_without_streaming(
                                                sample_rate);
     this->batch_stream->save_audio_data_to_wav(nullptr, 0, 0);
   }
-  TranscriberStream *stream = this->batch_stream;
+  std::shared_ptr<TranscriberStream> stream = this->batch_stream;
   std::vector<VoiceActivitySegment> segments;
   {
     std::lock_guard<std::mutex> lock(stream->vad_mutex);
@@ -331,11 +340,12 @@ int32_t Transcriber::create_stream() {
       this->options.vad_window_duration, this->options.vad_hop_size);
   const size_t vad_max_segment_sample_count =
       vad_sample_count_from_duration(this->options.vad_max_segment_duration);
-  TranscriberStream *stream = new TranscriberStream(
+  std::shared_ptr<TranscriberStream> stream = std::make_shared<TranscriberStream>(
       new VoiceActivityDetector(this->options.vad_threshold, vad_window_size,
                                 this->options.vad_hop_size,
                                 this->options.vad_look_behind_sample_count,
-                                vad_max_segment_sample_count),
+                                vad_max_segment_sample_count,
+                                this->options.vad_min_silence_duration_ms),
       stream_id, this->options.save_input_wav_path);
 
   this->streams.insert({stream_id, stream});
@@ -344,14 +354,22 @@ int32_t Transcriber::create_stream() {
 
 void Transcriber::free_stream(int32_t stream_id) {
   std::lock_guard<std::mutex> lock(this->streams_mutex);
-  TranscriberStream *stream = this->streams[stream_id];
-  this->streams.erase(stream_id);
-  delete stream;
+  auto it = this->streams.find(stream_id);
+  if (it != this->streams.end()) {
+    this->streams.erase(it);
+  }
 }
 
 void Transcriber::start_stream(int32_t stream_id) {
-  std::lock_guard<std::mutex> lock(this->streams_mutex);
-  TranscriberStream *stream = this->streams[stream_id];
+  std::shared_ptr<TranscriberStream> stream;
+  {
+    std::lock_guard<std::mutex> lock(this->streams_mutex);
+    auto it = this->streams.find(stream_id);
+    if (it == this->streams.end()) {
+      throw std::runtime_error("Stream not found");
+    }
+    stream = it->second;
+  }
   // Starting a stream invalidates any pointers to stream data (audio, strings)
   // that have been returned to the client during prior sessions.
   {
@@ -366,8 +384,15 @@ void Transcriber::start_stream(int32_t stream_id) {
 }
 
 void Transcriber::stop_stream(int32_t stream_id) {
-  std::lock_guard<std::mutex> lock(this->streams_mutex);
-  TranscriberStream *stream = this->streams[stream_id];
+  std::shared_ptr<TranscriberStream> stream;
+  {
+    std::lock_guard<std::mutex> lock(this->streams_mutex);
+    auto it = this->streams.find(stream_id);
+    if (it == this->streams.end()) {
+      throw std::runtime_error("Stream not found");
+    }
+    stream = it->second;
+  }
   stream->stop();
   stream->save_audio_data_to_wav(nullptr, 0, 0);
 }
@@ -376,37 +401,47 @@ void Transcriber::add_audio_to_stream(int32_t stream_id,
                                       const float *audio_data,
                                       uint64_t audio_length,
                                       int32_t sample_rate) {
-  std::lock_guard<std::mutex> lock(this->streams_mutex);
-  TranscriberStream *stream = this->streams[stream_id];
+  std::shared_ptr<TranscriberStream> stream;
+  {
+    std::lock_guard<std::mutex> lock(this->streams_mutex);
+    auto it = this->streams.find(stream_id);
+    if (it == this->streams.end()) {
+      throw std::runtime_error("Stream not found");
+    }
+    stream = it->second;
+  }
   if (!stream->vad->is_active()) {
     std::string error_message =
         "Adding new audio for stream with ID " + std::to_string(stream_id) +
         " but VAD is not active. Did you call start_stream()?";
     throw std::runtime_error(error_message);
   }
+  if (audio_length > static_cast<uint64_t>(INT32_MAX)) {
+    throw std::invalid_argument("Audio length exceeds INT32_MAX");
+  }
   stream->add_to_new_audio_buffer(audio_data, audio_length, sample_rate);
 }
 
 void Transcriber::transcribe_stream(int32_t stream_id, uint32_t flags,
                                     struct transcript_t **out_transcript) {
-  TranscriberStream *stream = nullptr;
+  std::shared_ptr<TranscriberStream> stream;
   {
     std::lock_guard<std::mutex> lock(this->streams_mutex);
-    if (this->streams.find(stream_id) == this->streams.end()) {
+    auto it = this->streams.find(stream_id);
+    if (it == this->streams.end()) {
       std::string error_message =
           "Stream with ID " + std::to_string(stream_id) + " not found in " +
           std::to_string(this->streams.size()) + " streams: ";
-      for (const auto &stream : this->streams) {
+      for (const auto &stream_pair : this->streams) {
         char addr_str[32];
-        snprintf(addr_str, sizeof(addr_str), "%p", (void *)stream.second);
-        error_message += "ID: " + std::to_string(stream.first) +
+        snprintf(addr_str, sizeof(addr_str), "%p", (void *)stream_pair.second.get());
+        error_message += "ID: " + std::to_string(stream_pair.first) +
                          ", Address: " + std::string(addr_str) + "\n";
       }
       throw std::runtime_error(error_message);
     }
+    stream = it->second;
   }
-
-  stream = this->streams[stream_id];
   if (stream == nullptr) {
     std::string error_message =
         "Stream with ID " + std::to_string(stream_id) + " is null";
@@ -441,6 +476,10 @@ void Transcriber::transcribe_stream(int32_t stream_id, uint32_t flags,
     std::lock_guard<std::mutex> lock(stream->vad_mutex);
     stream->vad->process_audio(audio_data, (int32_t)audio_length,
                                INTERNAL_SAMPLE_RATE);
+    // When the stream has stopped, ensure the VAD processes any remaining silence or cuts off the final segment
+    if (is_stopped) {
+      stream->vad->stop();
+    }
     segments = *(stream->vad->get_segments());
   }
   stream->clear_new_audio_buffer();
@@ -489,7 +528,7 @@ std::string Transcriber::transcript_line_to_string(
 
 void Transcriber::update_transcript_from_segments(
     const std::vector<VoiceActivitySegment> &segments,
-    TranscriberStream *stream, struct transcript_t **out_transcript) {
+    std::shared_ptr<TranscriberStream> stream, struct transcript_t **out_transcript) {
   stream->transcript_output->clear_update_flags();
 
   for (size_t segment_index = 0; segment_index < segments.size();
@@ -619,10 +658,14 @@ void Transcriber::update_transcript_from_segments(
           segment.audio_data.size() >= SpeakerEmbeddingModel::ideal_input_size;
       if (long_enough_to_analyze || line.is_complete) {
         std::vector<float> embedding;
-        int calculate_error =
-            this->speaker_embedding_model->calculate_embedding(
-                segment.audio_data.data(), segment.audio_data.size(),
-                &embedding);
+        int calculate_error;
+        {
+          std::lock_guard<std::mutex> speaker_lock(this->speaker_embedding_model_mutex);
+          calculate_error =
+              this->speaker_embedding_model->calculate_embedding(
+                  segment.audio_data.data(), segment.audio_data.size(),
+                  &embedding);
+        }
         if (calculate_error != 0) {
           LOGF("Failed to calculate embedding: %d", calculate_error);
           throw std::runtime_error("Failed to calculate embedding: " +
@@ -630,14 +673,17 @@ void Transcriber::update_transcript_from_segments(
         }
         const float audio_duration =
             segment.audio_data.size() / (float)INTERNAL_SAMPLE_RATE;
-        line.speaker_id = this->online_clusterer->embed_and_cluster(
-            embedding, audio_duration);
-        line.has_speaker_id = true;
-        if (!this->speaker_index_map.contains(line.speaker_id)) {
-          line.speaker_index = this->next_speaker_index++;
-          this->speaker_index_map.insert({line.speaker_id, line.speaker_index});
-        } else {
-          line.speaker_index = this->speaker_index_map.at(line.speaker_id);
+        {
+          std::lock_guard<std::mutex> speaker_lock(this->speaker_embedding_model_mutex);
+          line.speaker_id = this->online_clusterer->embed_and_cluster(
+              embedding, audio_duration);
+          line.has_speaker_id = true;
+          if (!this->speaker_index_map.contains(line.speaker_id)) {
+            line.speaker_index = this->next_speaker_index++;
+            this->speaker_index_map.insert({line.speaker_id, line.speaker_index});
+          } else {
+            line.speaker_index = this->speaker_index_map.at(line.speaker_id);
+          }
         }
       }
     }
@@ -659,30 +705,33 @@ std::string *Transcriber::transcribe_segment_with_streaming_model(
   }
 
   const MoonshineStreamingConfig &config = this->streaming_model->config;
+  
+  std::vector<int64_t> tokens;
+  tokens.push_back(config.bos_id);
+  
+  std::string text;
 
-  // Check if this is a new segment - if so, reset state
-  bool is_new_segment = (segment_id != this->current_streaming_segment_id);
-  if (is_new_segment) {
-    this->streaming_state.reset(config);
-    this->current_streaming_segment_id = segment_id;
-    this->streaming_samples_processed = 0;
-  }
+  {
+    std::lock_guard<std::mutex> lock(this->streaming_model_mutex);
 
-  // Calculate how many new samples we need to process
-  size_t new_samples_start = this->streaming_samples_processed;
+    // Check if this is a new segment - if so, reset state
+    bool is_new_segment = (segment_id != this->current_streaming_segment_id);
+    if (is_new_segment) {
+      this->streaming_state.reset(config);
+      this->current_streaming_segment_id = segment_id;
+      this->streaming_samples_processed = 0;
+    }
 
-  if (new_samples_start >= audio_length) {
-    // No new audio to process, but we may still need to decode
-    // (e.g., if is_final changed from false to true)
-  } else {
-    // Process only the NEW audio samples
-    const float *new_audio_data = audio_data + new_samples_start;
-    size_t new_audio_length = audio_length - new_samples_start;
+    // Calculate how many new samples we need to process
+    size_t new_samples_start = this->streaming_samples_processed;
 
-    const int chunk_size = 1280;  // 80ms at 16kHz
-    const size_t chunk_count = new_audio_length / chunk_size;
-    {
-      std::lock_guard<std::mutex> lock(this->streaming_model_mutex);
+    if (new_samples_start < audio_length) {
+      // Process only the NEW audio samples
+      const float *new_audio_data = audio_data + new_samples_start;
+      size_t new_audio_length = audio_length - new_samples_start;
+
+      const int chunk_size = 1280;  // 80ms at 16kHz
+      const size_t chunk_count = new_audio_length / chunk_size;
 
       for (size_t chunk_index = 0; chunk_index < chunk_count; chunk_index++) {
         size_t offset = chunk_index * chunk_size;
@@ -696,6 +745,22 @@ std::string *Transcriber::transcribe_segment_with_streaming_model(
         }
       }
 
+      // If it is final, process any remaining audio samples less than chunk_size
+      size_t remaining_samples = new_audio_length % chunk_size;
+      if (is_final && remaining_samples > 0) {
+        std::vector<float> padded_chunk(chunk_size, 0.0f);
+        size_t offset = chunk_count * chunk_size;
+        std::copy(new_audio_data + offset, new_audio_data + offset + remaining_samples, padded_chunk.begin());
+        int err = this->streaming_model->process_audio_chunk(
+            &this->streaming_state, padded_chunk.data(), chunk_size,
+            nullptr);
+        if (err != 0) {
+          LOGF("Failed to process final padded audio chunk: %d", err);
+          throw std::runtime_error("Failed to process final padded audio chunk: " +
+                                   std::to_string(err));
+        }
+      }
+
       // Run encoder - is_final determines if we emit all frames or keep
       // lookahead
       int new_frames = 0;
@@ -705,36 +770,33 @@ std::string *Transcriber::transcribe_segment_with_streaming_model(
         LOGF("Failed to encode: %d", err);
         throw std::runtime_error("Failed to encode: " + std::to_string(err));
       }
+
+      // Update the count of processed samples with the chunks we've actually
+      // processed.
+      this->streaming_samples_processed += chunk_count * chunk_size + (is_final ? remaining_samples : 0);
     }
 
-    // Update the count of processed samples with the chunks we've actually
-    // processed.
-    this->streaming_samples_processed += chunk_count * chunk_size;
-  }
+    // If no memory accumulated, return empty string
+    if (this->streaming_state.memory_len == 0) {
+      return new std::string();
+    }
 
-  // If no memory accumulated, return empty string
-  if (this->streaming_state.memory_len == 0) {
-    return new std::string();
-  }
+    // Reset decoder state before decoding (we decode from scratch each time
+    // since memory may have changed)
+    this->streaming_model->decoder_reset(&this->streaming_state);
 
-  // Reset decoder state before decoding (we decode from scratch each time
-  // since memory may have changed)
-  this->streaming_model->decoder_reset(&this->streaming_state);
+    // Decode to get transcription
+    const float duration_sec = audio_length / (float)INTERNAL_SAMPLE_RATE;
+    // For trailing segments or long segments, the previous formula based solely on time
+    // can accidentally truncate decoding before it outputs the full recognized word.
+    // Ensure we give the decoder enough headroom (max 256 or derived from duration + padding).
+    const int max_tokens =
+        std::min(static_cast<int>(std::ceil(duration_sec *
+                                            this->options.max_tokens_per_second)) + 30,
+                 256);
 
-  // Decode to get transcription
-  const float duration_sec = audio_length / (float)INTERNAL_SAMPLE_RATE;
-  const int max_tokens =
-      std::min(static_cast<int>(std::ceil(duration_sec *
-                                          this->options.max_tokens_per_second)),
-               256);
-  std::vector<int64_t> tokens;
-  tokens.push_back(config.bos_id);
-
-  std::vector<float> logits(config.vocab_size);
-  int current_token = config.bos_id;
-
-  {
-    std::lock_guard<std::mutex> lock(this->streaming_model_mutex);
+    std::vector<float> logits(config.vocab_size);
+    int current_token = config.bos_id;
 
     for (int step = 0; step < max_tokens; ++step) {
       int err = this->streaming_model->decode_step(
@@ -758,16 +820,17 @@ std::string *Transcriber::transcribe_segment_with_streaming_model(
 
       if (next_token == config.eos_id) break;
     }
+
+    // Save tokens for word timestamp alignment
+    this->last_streaming_tokens.clear();
+    for (auto t : tokens) {
+      this->last_streaming_tokens.push_back(static_cast<int>(t));
+    }
+
+    // Convert tokens to text
+    text = this->streaming_model->tokens_to_text(tokens);
   }
 
-  // Save tokens for word timestamp alignment
-  this->last_streaming_tokens.clear();
-  for (auto t : tokens) {
-    this->last_streaming_tokens.push_back(static_cast<int>(t));
-  }
-
-  // Convert tokens to text
-  std::string text = this->streaming_model->tokens_to_text(tokens);
   if (this->options.log_output_text) {
     LOGF("Streaming model transcribed text: '%s'", text.c_str());
   }
