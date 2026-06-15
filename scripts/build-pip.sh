@@ -9,6 +9,11 @@ CORE_BUILD_DIR=${CORE_DIR}/build
 rm -rf ${CORE_BUILD_DIR}
 mkdir -p ${CORE_BUILD_DIR}
 cd ${CORE_BUILD_DIR}
+# Align with bundled ONNX Runtime / dylibs so wheel metadata matches binary minimum macOS (silences
+# delocate/wheel warnings about MACOSX_DEPLOYMENT_TARGET vs interpreter).
+if [[ "$OSTYPE" == "darwin"* ]]; then
+	export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-15.0}"
+fi
 cmake ..
 cmake --build . --config Release
 
@@ -21,9 +26,12 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
 	else
 		cp ${CORE_DIR}/third-party/onnxruntime/lib/macos/x86_64/libonnxruntime*.dylib ${PYTHON_DIR}/src/moonshine_voice/
 	fi
+	codesign --force --sign - ${PYTHON_DIR}/src/moonshine_voice/libmoonshine.dylib
 elif grep -q "Raspberry Pi" /proc/cpuinfo 2>/dev/null || grep -q "BCM2" /proc/cpuinfo 2>/dev/null; then
+    LINUX_VERSION=2_39
 	cp ${CORE_DIR}/third-party/onnxruntime/lib/linux/aarch64/libonnxruntime*.so* ${PYTHON_DIR}/src/moonshine_voice/
 elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
+    LINUX_VERSION=2_34
 	cp ${CORE_DIR}/third-party/onnxruntime/lib/linux/x86_64/libonnxruntime*.so* ${PYTHON_DIR}/src/moonshine_voice/
 elif [[ "$OSTYPE" == "msys"* ]]; then
 	cp ${CORE_DIR}/third-party/onnxruntime/lib/windows/x86_64/libonnxruntime*.dll ${PYTHON_DIR}/src/moonshine_voice/
@@ -33,6 +41,10 @@ else
 fi
 
 cd ${PYTHON_DIR}
+
+if [[ "$OSTYPE" == "darwin"* ]]; then
+	export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-15.0}"
+fi
 
 rm -rf .venv
 uv venv
@@ -64,13 +76,12 @@ else
 	PLAT_NAME="any"
 fi
 
-# Build platform-specific wheel
-# bdist_wheel should auto-detect platform from binary files, but we can also specify it
+# Build platform-specific wheel (PEP 517 avoids deprecated setup.py install paths)
 rm -rf dist/* wheelhouse/*
-uv run setup.py bdist_wheel
+uv build --wheel --out-dir dist
 if [[ "$OSTYPE" == "linux-gnu"* ]]; then
 	# Target manylinux_2_34 for wider compatibility (default would be 2_39 on newer images)
-	auditwheel repair dist/moonshine_voice-*.whl -w dist/ --plat "manylinux_2_34_${ARCH}"
+	auditwheel repair dist/moonshine_voice-*.whl -w dist/ --plat "manylinux_${LINUX_VERSION}_${ARCH}"
 	rm -rf dist/moonshine_voice-*-linux_*.whl
 fi
 

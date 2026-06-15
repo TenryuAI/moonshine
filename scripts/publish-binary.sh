@@ -1,6 +1,6 @@
 #! /bin/bash -ex
 
-VERSION=0.0.51
+VERSION=0.0.62
 REPO="moonshine-ai/moonshine"
 UPLOAD_RELEASE=0
 
